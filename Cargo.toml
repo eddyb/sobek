@@ -1,0 +1,16 @@
+[package]
+name = "sobek"
+version = "0.0.1"
+authors = ["Eduard-Mihai Burtescu <edy.burt@gmail.com>"]
+edition = "2018"
+repository = "https://github.com/eddyb/sobek"
+license = "MIT/Apache-2.0"
+description = "Reverse engineering framework."
+
+[dependencies]
+scoped-tls = "0.1.2"
+slotmap = "0.3.0"
+
+[lib]
+doctest = false
+test = false
