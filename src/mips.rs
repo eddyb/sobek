@@ -40,7 +40,7 @@ impl Arch for Mips32 {
         pc: &mut Const,
         state: &mut State,
     ) -> Option<Effect> {
-        let instr = cx.platform.rom().load(*pc, MemSize::M32).unwrap().zext32();
+        let instr = cx.platform.rom().load(*pc, MemSize::M32).unwrap().as_u32();
         let add4 = |x| IntOp::Add.eval(x, Const::new(x.size, 4)).unwrap();
         *pc = add4(*pc);
 
@@ -51,7 +51,7 @@ impl Arch for Mips32 {
             let r = |i| field(11 + 5 * i, 5) as usize;
             (r(2), r(1), r(0))
         };
-        let imm = Const::new(B32, instr as i16 as i32 as u32);
+        let imm = Const::new(B32, instr as i16 as i32 as u32 as u64);
         // FIXME(eddyb) ensure more aggressively that this is always 0.
         let zero = state.regs[0];
 
@@ -103,7 +103,7 @@ impl Arch for Mips32 {
             ($cond:expr => $b:expr) => {
                 branch!($cond => $b,
                     cx.a(add4(*pc)),
-                    cx.a(IntOp::Add.eval(*pc, Const::new(B32, imm.zext32() << 2)).unwrap())
+                    cx.a(IntOp::Add.eval(*pc, Const::new(B32, (imm.as_u32() << 2) as u64)).unwrap())
                 )
             };
         }
@@ -126,9 +126,9 @@ impl Arch for Mips32 {
             let rt = state.regs[rt];
             let sa = field(6, 5);
             let v = match funct {
-                0 => val!(Int(IntOp::Shl, B32, rt, cx.a(Const::new(B32, sa)))),
-                2 => val!(Int(IntOp::ShrU, B32, rt, cx.a(Const::new(B32, sa)))),
-                3 => val!(Int(IntOp::ShrS, B32, rt, cx.a(Const::new(B32, sa)))),
+                0 => val!(Int(IntOp::Shl, B32, rt, cx.a(Const::new(B32, sa as u64)))),
+                2 => val!(Int(IntOp::ShrU, B32, rt, cx.a(Const::new(B32, sa as u64)))),
+                3 => val!(Int(IntOp::ShrS, B32, rt, cx.a(Const::new(B32, sa as u64)))),
 
                 8 => jump!(rs),
                 9 => {
@@ -169,7 +169,7 @@ impl Arch for Mips32 {
             }
             jump!(cx.a(Const::new(
                 B32,
-                (pc.zext32() & 0xc000_0000) | (field(0, 26) << 2)
+                ((pc.as_u32() & 0xc000_0000) | (field(0, 26) << 2)) as u64
             )))
         } else {
             // I format.
@@ -211,7 +211,7 @@ impl Arch for Mips32 {
                     }
                     state.set(rd, v);
                 }
-                15 => state.set(rd, cx.a(Const::new(B32, imm.zext32() << 16))),
+                15 => state.set(rd, cx.a(Const::new(B32, (imm.as_u32() << 16) as u64))),
 
                 32 => state.set(rd, val!(Sext(B32, val!(Load(mem_ref!(M8)))))),
                 33 => state.set(rd, val!(Sext(B32, val!(Load(mem_ref!(M16)))))),

@@ -19,15 +19,16 @@ impl Cartridge {
     fn load_physical(&self, addr: u32, size: MemSize) -> Result<Const, UnsupportedAddress> {
         match addr {
             0x0000_0400..=0x003f_ffff => Ok(self.load_raw(0x1000 + (addr - 0x400), size)),
-            _ => return Err(UnsupportedAddress(Const::new(BitSize::B32, addr))),
+            _ => return Err(UnsupportedAddress(Const::new(BitSize::B32, addr as u64))),
         }
     }
 
     pub fn load_raw(&self, addr: u32, size: MemSize) -> Const {
         let b = |i| self.data[addr as usize + i];
 
+        // FIXME(eddyb) deduplicate these if possible.
         match size {
-            MemSize::M8 => Const::new(BitSize::B8, b(0) as u32),
+            MemSize::M8 => Const::new(BitSize::B8, b(0) as u64),
             MemSize::M16 => {
                 assert_eq!(addr & 1, 0);
 
@@ -38,7 +39,7 @@ impl Cartridge {
                         u16::from_be_bytes(bytes)
                     } else {
                         u16::from_le_bytes(bytes)
-                    } as u32,
+                    } as u64,
                 )
             }
             MemSize::M32 => {
@@ -51,6 +52,19 @@ impl Cartridge {
                         u32::from_be_bytes(bytes)
                     } else {
                         u32::from_le_bytes(bytes)
+                    } as u64,
+                )
+            }
+            MemSize::M64 => {
+                assert_eq!(addr & 7, 0);
+
+                let bytes = [b(0), b(1), b(2), b(3), b(4), b(5), b(6), b(7)];
+                Const::new(
+                    BitSize::B64,
+                    if self.big_endian {
+                        u64::from_be_bytes(bytes)
+                    } else {
+                        u64::from_le_bytes(bytes)
                     },
                 )
             }
@@ -60,7 +74,7 @@ impl Cartridge {
 
 impl Rom for Cartridge {
     fn load(&self, addr: Const, size: MemSize) -> Result<Const, UnsupportedAddress> {
-        self.load_physical(self.virtual_to_physical(addr.zext32()), size)
+        self.load_physical(self.virtual_to_physical(addr.as_u32()), size)
     }
 }
 
@@ -93,7 +107,7 @@ pub fn analyze(rom: Cartridge) {
             println!("{:?} {{", last_end);
             println!(
                 "    /* {} unanalyzed bytes */",
-                entry_pc.zext32() - last_end.zext32()
+                entry_pc.as_u32() - last_end.as_u32()
             );
             println!("}}");
         }

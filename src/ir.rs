@@ -202,6 +202,7 @@ pub enum BitSize {
     B8,
     B16,
     B32,
+    B64,
 }
 
 impl BitSize {
@@ -211,29 +212,39 @@ impl BitSize {
             BitSize::B8 => 8,
             BitSize::B16 => 16,
             BitSize::B32 => 32,
+            BitSize::B64 => 64,
         }
     }
 
-    fn mask(self) -> u32 {
-        !0 >> (32 - self.bits())
+    fn mask(self) -> u64 {
+        !0 >> (64 - self.bits())
     }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Const {
     pub size: BitSize,
-    bits: u32,
+    bits: u64,
 }
 
 impl fmt::Debug for Const {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let (hi, lo) = ((self.bits >> 16) as u16, self.bits as u16);
-        if hi != 0 {
-            write!(f, "0x{:04x}_{:04x}", hi, lo)
-        } else if lo > 9 {
-            write!(f, "0x{:04x}", lo)
+        let (a, b, c, d) = (
+            (self.bits >> 48) as u16,
+            (self.bits >> 32) as u16,
+            (self.bits >> 16) as u16,
+            self.bits as u16,
+        );
+        if a != 0 {
+            write!(f, "0x{:04x}_{:04x}_{:04x}_{:04x}", a, b, c, d)
+        } else if b != 0 {
+            write!(f, "0x{:04x}_{:04x}_{:04x}", b, c, d)
+        } else if c != 0 {
+            write!(f, "0x{:04x}_{:04x}", c, d)
+        } else if d > 9 {
+            write!(f, "0x{:04x}", d)
         } else {
-            write!(f, "{}", lo)
+            write!(f, "{}", d)
         }
     }
 }
@@ -247,24 +258,32 @@ impl<P> AllocIn<Cx<P>> for Const {
 
 impl From<bool> for Const {
     fn from(b: bool) -> Self {
-        Const::new(BitSize::B1, b as u32)
+        Const::new(BitSize::B1, b as u64)
     }
 }
 
 impl Const {
-    pub fn new(size: BitSize, bits: u32) -> Self {
+    pub fn new(size: BitSize, bits: u64) -> Self {
         assert_eq!(bits, bits & size.mask());
 
         Const { size, bits }
     }
 
-    pub fn sext32(&self) -> i32 {
-        let n = 32 - self.size.bits();
-        (self.bits as i32) << n >> n
+    pub fn as_i32(&self) -> i32 {
+        self.as_i64() as i32
     }
 
-    pub fn zext32(&self) -> u32 {
-        let n = 32 - self.size.bits();
+    pub fn as_u32(&self) -> u32 {
+        self.as_u64() as u32
+    }
+
+    pub fn as_i64(&self) -> i64 {
+        let n = 64 - self.size.bits();
+        (self.bits as i64) << n >> n
+    }
+
+    pub fn as_u64(&self) -> u64 {
+        let n = 64 - self.size.bits();
         self.bits << n >> n
     }
 }
@@ -272,11 +291,8 @@ impl Const {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum IntOp {
     Add,
-    // HACK(eddyb) `Hi` variants work around 32-bit datapath.
     MulS,
-    MulHiS,
     MulU,
-    MulHiU,
     DivS,
     DivU,
     RemS,
@@ -306,49 +322,43 @@ impl IntOp {
             _ => false,
         };
         let is_signed = match self {
-            IntOp::MulS | IntOp::MulHiS | IntOp::DivS | IntOp::RemS | IntOp::LtS | IntOp::ShrS => {
-                true
-            }
+            IntOp::MulS | IntOp::DivS | IntOp::RemS | IntOp::LtS | IntOp::ShrS => true,
             _ => false,
         };
         if !is_shift {
             assert_eq!(a.size, b.size);
         }
         let a = if is_signed {
-            a.sext32() as u32
+            a.as_i64() as u64
         } else {
-            a.zext32()
+            a.as_u64()
         };
         let b = if is_signed && !is_shift {
-            b.sext32() as u32
+            b.as_i64() as u64
         } else {
-            b.zext32()
+            b.as_u64()
         };
 
-        let mul_s = |a, b| a as i32 as i64 * b as i32 as i64;
-        let mul_u = |a, b| a as u64 * b as u64;
         let r = match self {
             IntOp::Add => a.wrapping_add(b),
-            IntOp::MulS => mul_s(a, b) as u32,
-            IntOp::MulHiS => (mul_s(a, b) >> 32) as u32,
-            IntOp::MulU => mul_u(a, b) as u32,
-            IntOp::MulHiU => (mul_u(a, b) >> 32) as u32,
-            IntOp::DivS => (a as i32).checked_div(b as i32)? as u32,
+            IntOp::MulS => (a as i64 as i128 * b as i64 as i128) as u64,
+            IntOp::MulU => (a as u128 * b as u128) as u64,
+            IntOp::DivS => (a as i64).checked_div(b as i64)? as u64,
             IntOp::DivU => a.checked_div(b)?,
-            IntOp::RemS => (a as i32).checked_rem(b as i32)? as u32,
+            IntOp::RemS => (a as i64).checked_rem(b as i64)? as u64,
             IntOp::RemU => a.checked_rem(b)?,
 
-            IntOp::Eq => (a == b) as u32,
-            IntOp::LtS => ((a as i32) < (b as i32)) as u32,
-            IntOp::LtU => (a < b) as u32,
+            IntOp::Eq => (a == b) as u64,
+            IntOp::LtS => ((a as i64) < (b as i64)) as u64,
+            IntOp::LtU => (a < b) as u64,
 
             IntOp::And => a & b,
             IntOp::Or => a | b,
             IntOp::Xor => a ^ b,
 
-            IntOp::Shl => a.wrapping_shl(b),
-            IntOp::ShrS => (a as i32).wrapping_shr(b) as u32,
-            IntOp::ShrU => a.wrapping_shr(b),
+            IntOp::Shl => a.wrapping_shl(b as u32),
+            IntOp::ShrS => (a as i64).wrapping_shr(b as u32) as u64,
+            IntOp::ShrU => a.wrapping_shr(b as u32),
         };
         Some(Const::new(size, r & size.mask()))
     }
@@ -364,7 +374,7 @@ impl IntOp {
 
         // Symmetric ops.
         match (a, b) {
-            (Ok(x), Err(other)) | (Err(other), Ok(x)) => match (self, x.sext32()) {
+            (Ok(x), Err(other)) | (Err(other), Ok(x)) => match (self, x.as_i64()) {
                 (IntOp::Add, 0)
                 | (IntOp::MulS, 1)
                 | (IntOp::MulU, 1)
@@ -372,12 +382,9 @@ impl IntOp {
                 | (IntOp::Or, 0)
                 | (IntOp::Xor, 0) => return Some(Err(other)),
 
-                (IntOp::MulS, 0)
-                | (IntOp::MulU, 0)
-                | (IntOp::MulHiS, 0)
-                | (IntOp::MulHiU, 0)
-                | (IntOp::And, 0)
-                | (IntOp::Or, -1) => return Some(Ok(x)),
+                (IntOp::MulS, 0) | (IntOp::MulU, 0) | (IntOp::And, 0) | (IntOp::Or, -1) => {
+                    return Some(Ok(x))
+                }
 
                 _ => {}
             },
@@ -386,7 +393,7 @@ impl IntOp {
 
         // Asymmetric ops.
         match (a, b) {
-            (Ok(a), Err(_)) => match (a.sext32(), self) {
+            (Ok(a), Err(_)) => match (a.as_i64(), self) {
                 (0, IntOp::DivS)
                 | (0, IntOp::DivU)
                 | (0, IntOp::RemS)
@@ -401,7 +408,7 @@ impl IntOp {
                 _ => {}
             },
 
-            (Err(a), Ok(b)) => match (self, b.sext32()) {
+            (Err(a), Ok(b)) => match (self, b.as_i64()) {
                 (IntOp::DivS, 1)
                 | (IntOp::DivU, 1)
                 | (IntOp::Shl, 0)
@@ -456,6 +463,7 @@ pub enum MemSize {
     M8,
     M16,
     M32,
+    M64,
 }
 
 impl Into<BitSize> for MemSize {
@@ -464,6 +472,7 @@ impl Into<BitSize> for MemSize {
             MemSize::M8 => BitSize::B8,
             MemSize::M16 => BitSize::B16,
             MemSize::M32 => BitSize::B32,
+            MemSize::M64 => BitSize::B64,
         }
     }
 }
@@ -474,6 +483,7 @@ impl MemSize {
             MemSize::M8 => 8,
             MemSize::M16 => 16,
             MemSize::M32 => 32,
+            MemSize::M64 => 64,
         }
     }
 }
@@ -614,7 +624,7 @@ impl Val {
             assert!(size < x_size);
 
             if let Some(c) = cx[x].as_const() {
-                self = Val::Const(Const::new(size, c.zext32() & size.mask()));
+                self = Val::Const(Const::new(size, c.as_u64() & size.mask()));
             }
         }
 
@@ -623,7 +633,7 @@ impl Val {
             assert!(size > x_size);
 
             if let Some(c) = cx[x].as_const() {
-                self = Val::Const(Const::new(size, (c.sext32() as u32) & size.mask()));
+                self = Val::Const(Const::new(size, (c.as_i64() as u64) & size.mask()));
             }
         }
 
@@ -632,7 +642,7 @@ impl Val {
             assert!(size > x_size);
 
             if let Some(c) = cx[x].as_const() {
-                self = Val::Const(Const::new(size, c.zext32()));
+                self = Val::Const(Const::new(size, c.as_u64()));
             }
         }
 
