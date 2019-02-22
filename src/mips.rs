@@ -87,11 +87,15 @@ impl Arch for Mips32 {
         }
         macro_rules! branch {
             ($cond:expr => $b:expr, $t:expr, $e:expr) => {{
-                let (cond, t, e) = if $b {
-                    ($cond, $t, $e)
+                let (cond, t, e) = ($cond, $t, $e);
+                let (t, e) = if $b {
+                    (t, e)
                 } else {
-                    ($cond, $e, $t)
+                    (e, t)
                 };
+
+                assert_eq!(cx[cond].size(), B1);
+
                 // Process delay slot.
                 assert_eq!(Self::lift_instr(cx, pc, state), None);
                 return Some(Effect::Branch { cond, t, e });
@@ -138,8 +142,8 @@ impl Arch for Mips32 {
                 37 => val!(Int(IntOp::Or, B32, rs, rt)),
                 38 => val!(Int(IntOp::Xor, B32, rs, rt)),
                 39 => val!(bit_not(val!(Int(IntOp::Or, B32, rs, rt)))),
-                42 => val!(Int(IntOp::LtS, B32, rs, rt)),
-                43 => val!(Int(IntOp::LtU, B32, rs, rt)),
+                42 => val!(Zext(B32, val!(Int(IntOp::LtS, B32, rs, rt)))),
+                43 => val!(Zext(B32, val!(Int(IntOp::LtU, B32, rs, rt)))),
 
                 funct => {
                     eprintln!("mips: SPECIAL/funct={} unknown", funct);
@@ -200,7 +204,12 @@ impl Arch for Mips32 {
 
                         _ => unreachable!(),
                     };
-                    state.set(rd, val!(Int(op, B32, rs, cx.a(imm))));
+
+                    let mut v = val!(Int(op, B32, rs, cx.a(imm)));
+                    if cx[v].size() == B1 {
+                        v = val!(Zext(B32, v));
+                    }
+                    state.set(rd, v);
                 }
                 15 => state.set(rd, cx.a(Const::new(B32, imm.zext32() << 16))),
 

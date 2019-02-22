@@ -297,7 +297,10 @@ pub enum IntOp {
 
 impl IntOp {
     pub fn eval(self, a: Const, b: Const) -> Option<Const> {
-        let size = a.size;
+        let size = match self {
+            IntOp::Eq | IntOp::LtS | IntOp::LtU => BitSize::B1,
+            _ => a.size,
+        };
         let is_shift = match self {
             IntOp::Shl | IntOp::ShrU | IntOp::ShrS => true,
             _ => false,
@@ -544,6 +547,11 @@ impl Val {
         match self {
             Val::InReg(r) => r.size,
             Val::Const(c) => c.size,
+
+            Val::Int(IntOp::Eq, _, _, _)
+            | Val::Int(IntOp::LtS, _, _, _)
+            | Val::Int(IntOp::LtU, _, _, _) => BitSize::B1,
+
             Val::Int(_, size, _, _)
             | Val::Trunc(size, _)
             | Val::Sext(size, _)
