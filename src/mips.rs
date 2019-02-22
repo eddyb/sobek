@@ -1,5 +1,6 @@
 use crate::ir::{
-    Arch, Const, Cx, Effect, IntOp, Mem, MemRef, MemSize, Platform, Reg, Rom, State, Use, Val,
+    Arch, BitSize::*, Const, Cx, Effect, IntOp, Mem, MemRef, MemSize, Platform, Reg, Rom, State,
+    Use, Val,
 };
 use std::iter;
 
@@ -15,16 +16,18 @@ impl State {
 
 impl Arch for Mips32 {
     fn default_regs(cx: &mut Cx<impl Platform<Arch = Self>>) -> Vec<Use<Val>> {
-        iter::once(Val::Const(Const(0)))
+        iter::once(Val::Const(Const::new(B32, 0)))
             .chain((1..32).map(|i| {
                 Val::InReg(Reg {
                     index: i,
+                    size: B32,
                     name: None,
                 })
             }))
             .chain(["lo", "hi"].iter().enumerate().map(|(i, name)| {
                 Val::InReg(Reg {
                     index: 32 + i,
+                    size: B32,
                     name: Some(name),
                 })
             }))
@@ -37,8 +40,9 @@ impl Arch for Mips32 {
         pc: &mut Const,
         state: &mut State,
     ) -> Option<Effect> {
-        let instr = cx.platform.rom().load(*pc, MemSize::M32).unwrap().0;
-        pc.0 += 4;
+        let instr = cx.platform.rom().load(*pc, MemSize::M32).unwrap().zext32();
+        let add4 = |x| IntOp::Add.eval(x, Const::new(x.size, 4)).unwrap();
+        *pc = add4(*pc);
 
         let field = |i, w| (instr >> i) & ((1u32 << w) - 1u32);
 
@@ -47,7 +51,7 @@ impl Arch for Mips32 {
             let r = |i| field(11 + 5 * i, 5) as usize;
             (r(2), r(1), r(0))
         };
-        let imm = Const(instr as i16 as i32 as u32);
+        let imm = Const::new(B32, instr as i16 as i32 as u32);
         // FIXME(eddyb) ensure more aggressively that this is always 0.
         let zero = state.regs[0];
 
@@ -67,7 +71,7 @@ impl Arch for Mips32 {
 
         macro_rules! link {
             ($r:expr) => {
-                state.set($r, cx.a(Const(pc.0 + 4)))
+                state.set($r, cx.a(add4(*pc)))
             };
             () => {
                 link!(31)
@@ -94,8 +98,8 @@ impl Arch for Mips32 {
             }};
             ($cond:expr => $b:expr) => {
                 branch!($cond => $b,
-                    cx.a(Const(pc.0 + 4)),
-                    cx.a(Const(pc.0.wrapping_add(imm.0 << 2)))
+                    cx.a(add4(*pc)),
+                    cx.a(IntOp::Add.eval(*pc, Const::new(B32, imm.zext32() << 2)).unwrap())
                 )
             };
         }
@@ -118,9 +122,9 @@ impl Arch for Mips32 {
             let rt = state.regs[rt];
             let sa = field(6, 5);
             let v = match funct {
-                0 => val!(Int(IntOp::Shl, rt, cx.a(Const(sa)))),
-                2 => val!(Int(IntOp::ShrU, rt, cx.a(Const(sa)))),
-                3 => val!(Int(IntOp::ShrS, rt, cx.a(Const(sa)))),
+                0 => val!(Int(IntOp::Shl, B32, rt, cx.a(Const::new(B32, sa)))),
+                2 => val!(Int(IntOp::ShrU, B32, rt, cx.a(Const::new(B32, sa)))),
+                3 => val!(Int(IntOp::ShrS, B32, rt, cx.a(Const::new(B32, sa)))),
 
                 8 => jump!(rs),
                 9 => {
@@ -128,14 +132,14 @@ impl Arch for Mips32 {
                     jump!(rs);
                 }
 
-                32 | 33 => val!(Int(IntOp::Add, rs, rt)),
-                34 | 35 => val!(Int(IntOp::Add, rs, val!(int_neg(rt)))),
-                36 => val!(Int(IntOp::And, rs, rt)),
-                37 => val!(Int(IntOp::Or, rs, rt)),
-                38 => val!(Int(IntOp::Xor, rs, rt)),
-                39 => val!(bit_not(val!(Int(IntOp::Or, rs, rt)))),
-                42 => val!(Int(IntOp::LtS, rs, rt)),
-                43 => val!(Int(IntOp::LtU, rs, rt)),
+                32 | 33 => val!(Int(IntOp::Add, B32, rs, rt)),
+                34 | 35 => val!(Int(IntOp::Add, B32, rs, val!(int_neg(rt)))),
+                36 => val!(Int(IntOp::And, B32, rs, rt)),
+                37 => val!(Int(IntOp::Or, B32, rs, rt)),
+                38 => val!(Int(IntOp::Xor, B32, rs, rt)),
+                39 => val!(bit_not(val!(Int(IntOp::Or, B32, rs, rt)))),
+                42 => val!(Int(IntOp::LtS, B32, rs, rt)),
+                43 => val!(Int(IntOp::LtU, B32, rs, rt)),
 
                 funct => {
                     eprintln!("mips: SPECIAL/funct={} unknown", funct);
@@ -147,8 +151,8 @@ impl Arch for Mips32 {
             // REGIMM (I format w/o rt).
             let rs = state.regs[rs];
             match rt {
-                0 => branch!(val!(Int(IntOp::LtS, rs, zero)) => true),
-                1 => branch!(val!(Int(IntOp::LtS, rs, zero)) => false),
+                0 => branch!(val!(Int(IntOp::LtS, B32, rs, zero)) => true),
+                1 => branch!(val!(Int(IntOp::LtS, B32, rs, zero)) => false),
                 _ => {
                     eprintln!("mips: REGIMM/rt={} unknown", rt);
                     return None;
@@ -159,7 +163,10 @@ impl Arch for Mips32 {
             if op == 3 {
                 link!();
             }
-            jump!(cx.a(Const((pc.0 & 0xc000_0000) | (field(0, 26) << 2))))
+            jump!(cx.a(Const::new(
+                B32,
+                (pc.zext32() & 0xc000_0000) | (field(0, 26) << 2)
+            )))
         } else {
             // I format.
             let rd = rt;
@@ -170,17 +177,17 @@ impl Arch for Mips32 {
                 ($sz:ident) => {
                     MemRef {
                         mem: state.mem,
-                        addr: val!(Int(IntOp::Add, rs, cx.a(imm))),
+                        addr: val!(Int(IntOp::Add, B32, rs, cx.a(imm))),
                         size: MemSize::$sz,
                     }
                 };
             }
 
             match op {
-                4 => branch!(val!(Int(IntOp::Eq, rs, rt)) => true),
-                5 => branch!(val!(Int(IntOp::Eq, rs, rt)) => false),
-                6 => branch!(val!(Int(IntOp::LtS, zero, rs)) => false),
-                7 => branch!(val!(Int(IntOp::LtS, zero, rs)) => true),
+                4 => branch!(val!(Int(IntOp::Eq, B32, rs, rt)) => true),
+                5 => branch!(val!(Int(IntOp::Eq, B32, rs, rt)) => false),
+                6 => branch!(val!(Int(IntOp::LtS, B32, zero, rs)) => false),
+                7 => branch!(val!(Int(IntOp::LtS, B32, zero, rs)) => true),
 
                 8..=14 => {
                     let op = match op {
@@ -193,16 +200,18 @@ impl Arch for Mips32 {
 
                         _ => unreachable!(),
                     };
-                    state.set(rd, val!(Int(op, rs, cx.a(imm))));
+                    state.set(rd, val!(Int(op, B32, rs, cx.a(imm))));
                 }
-                15 => state.set(rd, cx.a(Const(imm.0 << 16))),
+                15 => state.set(rd, cx.a(Const::new(B32, imm.zext32() << 16))),
 
+                32 => state.set(rd, val!(Sext(B32, val!(Load(mem_ref!(M8)))))),
+                33 => state.set(rd, val!(Sext(B32, val!(Load(mem_ref!(M16)))))),
                 35 => state.set(rd, val!(Load(mem_ref!(M32)))),
-                36 => state.set(rd, val!(Load(mem_ref!(M8)))),
-                37 => state.set(rd, val!(Load(mem_ref!(M16)))),
+                36 => state.set(rd, val!(Zext(B32, val!(Load(mem_ref!(M8)))))),
+                37 => state.set(rd, val!(Zext(B32, val!(Load(mem_ref!(M16)))))),
 
-                40 => state.mem = mem!(Store(mem_ref!(M8), rt)),
-                41 => state.mem = mem!(Store(mem_ref!(M16), rt)),
+                40 => state.mem = mem!(Store(mem_ref!(M8), val!(Trunc(B8, rt)))),
+                41 => state.mem = mem!(Store(mem_ref!(M16), val!(Trunc(B16, rt)))),
                 43 => state.mem = mem!(Store(mem_ref!(M32), rt)),
 
                 _ => eprintln!("mips: op={} unknown", op),

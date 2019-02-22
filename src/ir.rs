@@ -196,12 +196,38 @@ scoped_thread_local!(static DBG_LOCALS: PerKind<
     HashMap<Use<Mem>, Result<usize, Mem>>,
 >);
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BitSize {
+    B1,
+    B8,
+    B16,
+    B32,
+}
+
+impl BitSize {
+    fn bits(self) -> u8 {
+        match self {
+            BitSize::B1 => 1,
+            BitSize::B8 => 8,
+            BitSize::B16 => 16,
+            BitSize::B32 => 32,
+        }
+    }
+
+    fn mask(self) -> u32 {
+        !0 >> (32 - self.bits())
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Const(pub u32);
+pub struct Const {
+    pub size: BitSize,
+    bits: u32,
+}
 
 impl fmt::Debug for Const {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let (hi, lo) = ((self.0 >> 16) as u16, self.0 as u16);
+        let (hi, lo) = ((self.bits >> 16) as u16, self.bits as u16);
         if hi != 0 {
             write!(f, "0x{:04x}_{:04x}", hi, lo)
         } else if lo > 9 {
@@ -216,6 +242,30 @@ impl<P> AllocIn<Cx<P>> for Const {
     type Kind = Val;
     fn alloc_in(self, cx: &mut Cx<P>) -> Use<Val> {
         cx.a(Val::Const(self))
+    }
+}
+
+impl From<bool> for Const {
+    fn from(b: bool) -> Self {
+        Const::new(BitSize::B1, b as u32)
+    }
+}
+
+impl Const {
+    pub fn new(size: BitSize, bits: u32) -> Self {
+        assert_eq!(bits, bits & size.mask());
+
+        Const { size, bits }
+    }
+
+    pub fn sext32(&self) -> i32 {
+        let n = 32 - self.size.bits();
+        (self.bits as i32) << n >> n
+    }
+
+    pub fn zext32(&self) -> u32 {
+        let n = 32 - self.size.bits();
+        self.bits << n >> n
     }
 }
 
@@ -246,10 +296,35 @@ pub enum IntOp {
 }
 
 impl IntOp {
-    pub fn eval(self, Const(a): Const, Const(b): Const) -> Option<Const> {
+    pub fn eval(self, a: Const, b: Const) -> Option<Const> {
+        let size = a.size;
+        let is_shift = match self {
+            IntOp::Shl | IntOp::ShrU | IntOp::ShrS => true,
+            _ => false,
+        };
+        let is_signed = match self {
+            IntOp::MulS | IntOp::MulHiS | IntOp::DivS | IntOp::RemS | IntOp::LtS | IntOp::ShrS => {
+                true
+            }
+            _ => false,
+        };
+        if !is_shift {
+            assert_eq!(a.size, b.size);
+        }
+        let a = if is_signed {
+            a.sext32() as u32
+        } else {
+            a.zext32()
+        };
+        let b = if is_signed && !is_shift {
+            b.sext32() as u32
+        } else {
+            b.zext32()
+        };
+
         let mul_s = |a, b| a as i32 as i64 * b as i32 as i64;
         let mul_u = |a, b| a as u64 * b as u64;
-        Some(Const(match self {
+        let r = match self {
             IntOp::Add => a.wrapping_add(b),
             IntOp::MulS => mul_s(a, b) as u32,
             IntOp::MulHiS => (mul_s(a, b) >> 32) as u32,
@@ -271,7 +346,8 @@ impl IntOp {
             IntOp::Shl => a.wrapping_shl(b),
             IntOp::ShrS => (a as i32).wrapping_shr(b) as u32,
             IntOp::ShrU => a.wrapping_shr(b),
-        }))
+        };
+        Some(Const::new(size, r & size.mask()))
     }
 
     pub fn simplify<T: Copy>(
@@ -285,20 +361,20 @@ impl IntOp {
 
         // Symmetric ops.
         match (a, b) {
-            (Ok(Const(x)), Err(other)) | (Err(other), Ok(Const(x))) => match (self, x) {
+            (Ok(x), Err(other)) | (Err(other), Ok(x)) => match (self, x.sext32()) {
                 (IntOp::Add, 0)
                 | (IntOp::MulS, 1)
                 | (IntOp::MulU, 1)
-                | (IntOp::And, 0xffff_ffff)
+                | (IntOp::And, -1)
                 | (IntOp::Or, 0)
                 | (IntOp::Xor, 0) => return Some(Err(other)),
 
                 (IntOp::MulS, 0)
                 | (IntOp::MulU, 0)
+                | (IntOp::MulHiS, 0)
+                | (IntOp::MulHiU, 0)
                 | (IntOp::And, 0)
-                | (IntOp::Or, 0xffff_ffff) => return Some(Ok(Const(x))),
-
-                (IntOp::MulHiS, 0) | (IntOp::MulHiU, 0..=1) => return Some(Ok(Const(0))),
+                | (IntOp::Or, -1) => return Some(Ok(x)),
 
                 _ => {}
             },
@@ -307,34 +383,49 @@ impl IntOp {
 
         // Asymmetric ops.
         match (a, b) {
-            (Ok(Const(a)), Err(_)) => match (a, self) {
+            (Ok(a), Err(_)) => match (a.sext32(), self) {
                 (0, IntOp::DivS)
                 | (0, IntOp::DivU)
                 | (0, IntOp::RemS)
                 | (0, IntOp::RemU)
                 | (0, IntOp::Shl)
                 | (0, IntOp::ShrS)
-                | (0xffff_ffff, IntOp::ShrS)
-                | (0, IntOp::ShrU) => return Some(Ok(Const(a))),
+                | (-1, IntOp::ShrS)
+                | (0, IntOp::ShrU) => return Some(Ok(a)),
 
-                (0x7fff_ffff, IntOp::LtS) | (0xffff_ffff, IntOp::LtU) => return Some(Ok(Const(1))),
+                (-1, IntOp::LtU) => return Some(Ok(Const::from(true))),
 
                 _ => {}
             },
 
-            (Err(a), Ok(Const(b))) => match (self, b) {
+            (Err(a), Ok(b)) => match (self, b.sext32()) {
                 (IntOp::DivS, 1)
                 | (IntOp::DivU, 1)
                 | (IntOp::Shl, 0)
                 | (IntOp::ShrS, 0)
                 | (IntOp::ShrU, 0) => return Some(Err(a)),
 
-                (IntOp::LtS, 0x8000_0000) | (IntOp::LtU, 0) => return Some(Ok(Const(0))),
+                (IntOp::LtU, 0) => return Some(Ok(Const::from(false))),
 
                 _ => {}
             },
 
             _ => {}
+        }
+
+        if self == IntOp::LtS {
+            match (a, b) {
+                // FIXME(eddyb) move these (max & min) values somewhere more sensible.
+                (Ok(a), Err(_)) if a.bits == ((1 << (a.size.bits() - 1)) - 1) => {
+                    return Some(Ok(Const::from(true)));
+                }
+
+                (Err(_), Ok(b)) if b.bits == 1 << (b.size.bits() - 1) => {
+                    return Some(Ok(Const::from(false)));
+                }
+
+                _ => {}
+            }
         }
 
         None
@@ -344,6 +435,7 @@ impl IntOp {
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Reg {
     pub index: usize,
+    pub size: BitSize,
     pub name: Option<&'static str>,
 }
 
@@ -361,6 +453,16 @@ pub enum MemSize {
     M8,
     M16,
     M32,
+}
+
+impl Into<BitSize> for MemSize {
+    fn into(self) -> BitSize {
+        match self {
+            MemSize::M8 => BitSize::B8,
+            MemSize::M16 => BitSize::B16,
+            MemSize::M32 => BitSize::B32,
+        }
+    }
 }
 
 impl MemSize {
@@ -401,7 +503,10 @@ pub enum Val {
     InReg(Reg),
 
     Const(Const),
-    Int(IntOp, Use<Val>, Use<Val>),
+    Int(IntOp, BitSize, Use<Val>, Use<Val>),
+    Trunc(BitSize, Use<Val>),
+    Sext(BitSize, Use<Val>),
+    Zext(BitSize, Use<Val>),
 
     Load(MemRef),
 }
@@ -411,19 +516,40 @@ impl fmt::Debug for Val {
         match self {
             Val::InReg(r) => write!(f, "in.{:?}", r),
             Val::Const(c) => c.fmt(f),
-            Val::Int(op, a, b) => write!(f, "{:?}({:?}, {:?})", op, a, b),
-            Val::Load(r) => write!(f, "{:?}.Load{}({:?})", r.mem, r.size.bits(), r.addr),
+            Val::Int(op, size, a, b) => write!(f, "{:?}.{}({:?}, {:?})", op, size.bits(), a, b),
+            Val::Trunc(size, x) => write!(f, "Trunc.{}({:?})", size.bits(), x),
+            Val::Sext(size, x) => write!(f, "Sext.{}({:?})", size.bits(), x),
+            Val::Zext(size, x) => write!(f, "Zext.{}({:?})", size.bits(), x),
+            Val::Load(r) => write!(f, "{:?}.Load.{}({:?})", r.mem, r.size.bits(), r.addr),
         }
     }
 }
 
 impl Val {
     pub fn int_neg<P>(v: Use<Val>) -> impl AllocIn<Cx<P>, Kind = Self> {
-        move |cx: &mut Cx<P>| Val::Int(IntOp::MulS, v, cx.a(Const(!0)))
+        move |cx: &mut Cx<P>| {
+            let size = cx[v].size();
+            Val::Int(IntOp::MulS, size, v, cx.a(Const::new(size, size.mask())))
+        }
     }
 
     pub fn bit_not<P>(v: Use<Val>) -> impl AllocIn<Cx<P>, Kind = Self> {
-        move |cx: &mut Cx<P>| Val::Int(IntOp::Xor, v, cx.a(Const(!0)))
+        move |cx: &mut Cx<P>| {
+            let size = cx[v].size();
+            Val::Int(IntOp::Xor, size, v, cx.a(Const::new(size, size.mask())))
+        }
+    }
+
+    pub fn size(&self) -> BitSize {
+        match self {
+            Val::InReg(r) => r.size,
+            Val::Const(c) => c.size,
+            Val::Int(_, size, _, _)
+            | Val::Trunc(size, _)
+            | Val::Sext(size, _)
+            | Val::Zext(size, _) => *size,
+            Val::Load(r) => r.size.into(),
+        }
     }
 
     pub fn as_const(&self) -> Option<Const> {
@@ -435,7 +561,23 @@ impl Val {
 
     fn normalize<P>(mut self, cx: &mut Cx<P>) -> Result<Self, Use<Self>> {
         // TODO(eddyb) resolve loads.
-        if let Val::Int(op, a, b) = self {
+
+        if let Val::Const(c) = self {
+            assert_eq!(c.bits, c.bits & c.size.mask());
+        }
+
+        if let Val::Int(op, size, a, b) = self {
+            let a_size = cx[a].size();
+            assert_eq!(a_size, size);
+
+            let is_shift = match op {
+                IntOp::Shl | IntOp::ShrU | IntOp::ShrS => true,
+                _ => false,
+            };
+            if !is_shift {
+                assert_eq!(a_size, cx[b].size());
+            }
+
             let c_a = cx[a].as_const();
             let c_b = cx[b].as_const();
             if let Some(r) = op.simplify(c_a.ok_or(a), c_b.ok_or(b)) {
@@ -447,12 +589,42 @@ impl Val {
 
             // HACK(eddyb) fuse `(a + x) + y` where `x` and `y` are constants.
             match (op, cx[a], cx[b]) {
-                (IntOp::Add, Val::Int(IntOp::Add, a, b), Val::Const(y)) => {
+                (IntOp::Add, Val::Int(IntOp::Add, _, a, b), Val::Const(y)) => {
                     if let Val::Const(x) = cx[b] {
-                        return Ok(Val::Int(IntOp::Add, a, cx.a(Const(x.0.wrapping_add(y.0)))));
+                        if let Some(xy) = IntOp::Add.eval(x, y) {
+                            return Ok(Val::Int(IntOp::Add, size, a, cx.a(xy)));
+                        }
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // FIXME(eddyb) deduplicate these
+        if let Val::Trunc(size, x) = self {
+            let x_size = cx[x].size();
+            assert!(size < x_size);
+
+            if let Some(c) = cx[x].as_const() {
+                self = Val::Const(Const::new(size, c.zext32() & size.mask()));
+            }
+        }
+
+        if let Val::Sext(size, x) = self {
+            let x_size = cx[x].size();
+            assert!(size > x_size);
+
+            if let Some(c) = cx[x].as_const() {
+                self = Val::Const(Const::new(size, (c.sext32() as u32) & size.mask()));
+            }
+        }
+
+        if let Val::Zext(size, x) = self {
+            let x_size = cx[x].size();
+            assert!(size > x_size);
+
+            if let Some(c) = cx[x].as_const() {
+                self = Val::Const(Const::new(size, c.zext32()));
             }
         }
 
@@ -503,10 +675,11 @@ impl Visit for Val {
     fn walk(&self, visitor: &mut impl Visitor) {
         match *self {
             Val::InReg(_) | Val::Const(_) => {}
-            Val::Int(_, a, b) => {
+            Val::Int(_, _, a, b) => {
                 visitor.visit_val_use(a);
                 visitor.visit_val_use(b);
             }
+            Val::Trunc(_, x) | Val::Sext(_, x) | Val::Zext(_, x) => visitor.visit_val_use(x),
             Val::Load(r) => {
                 visitor.visit_mem_use(r.mem);
                 visitor.visit_val_use(r.addr);
@@ -525,7 +698,10 @@ impl Use<Val> {
 
             Val::Const(_) => return self,
 
-            Val::Int(op, a, b) => Val::Int(op, a.subst(cx, base), b.subst(cx, base)),
+            Val::Int(op, size, a, b) => Val::Int(op, size, a.subst(cx, base), b.subst(cx, base)),
+            Val::Trunc(size, x) => Val::Trunc(size, x.subst(cx, base)),
+            Val::Sext(size, x) => Val::Sext(size, x.subst(cx, base)),
+            Val::Zext(size, x) => Val::Zext(size, x.subst(cx, base)),
             Val::Load(r) => Val::Load(r.subst(cx, base)),
         };
         cx.a(v)
@@ -545,7 +721,7 @@ impl fmt::Debug for Mem {
             Mem::In => write!(f, "in.m"),
             Mem::Store(r, x) => write!(
                 f,
-                "{:?}.Store{}({:?}, {:?})",
+                "{:?}.Store.{}({:?}, {:?})",
                 r.mem,
                 r.size.bits(),
                 r.addr,
@@ -556,7 +732,12 @@ impl fmt::Debug for Mem {
 }
 
 impl Mem {
-    fn normalize<P>(self, _cx: &mut Cx<P>) -> Result<Self, Use<Self>> {
+    fn normalize<P>(self, cx: &mut Cx<P>) -> Result<Self, Use<Self>> {
+        if let Mem::Store(r, v) = self {
+            let r_size: BitSize = r.size.into();
+            assert_eq!(r_size, cx[v].size());
+        }
+
         Ok(self)
     }
 
@@ -880,8 +1061,9 @@ impl<P> Cx<P> {
                 // Ideally this would be provided by the `Arch`.
                 let r = match self[default] {
                     Val::InReg(r) if i == r.index => r,
-                    _ => Reg {
+                    default => Reg {
                         index: i,
+                        size: default.size(),
                         name: None,
                     },
                 };
