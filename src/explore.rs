@@ -1,14 +1,131 @@
-use crate::ir::{Arch, Block, Const, Cx, Effect, Platform, Use, Val};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use crate::ir::{
+    Arch, BitSize, Block, Const, Cx, Effect, MemSize, Platform, State, Use, Val, Visit, Visitor,
+};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt;
+
+#[derive(Copy, Clone, Debug)]
+enum Set1<T> {
+    Empty,
+    One(T),
+    Many,
+}
+
+impl<T: Eq> Set1<T> {
+    fn insert(&mut self, value: T) {
+        match *self {
+            Set1::Empty => *self = Set1::One(value),
+            Set1::One(ref prev) if *prev == value => {}
+            _ => *self = Set1::Many,
+        }
+    }
+
+    fn union(mut self, other: Self) -> Self {
+        match other {
+            Set1::Empty => {}
+            Set1::One(x) => self.insert(x),
+            Set1::Many => return Set1::Many,
+        }
+        self
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlockId {
+    pub entry_pc: u64,
+}
+
+impl fmt::Debug for BlockId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        Const::new(BitSize::B64, self.entry_pc).fmt(f)
+    }
+}
+
+impl From<Const> for BlockId {
+    fn from(entry_pc: Const) -> Self {
+        BlockId {
+            entry_pc: entry_pc.as_u64(),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+enum ReducedVal {
+    Simple(Use<Val>),
+    Load { addr: Use<Val>, size: MemSize },
+}
+
+impl Visit for ReducedVal {
+    fn walk(&self, visitor: &mut impl Visitor) {
+        match *self {
+            ReducedVal::Simple(val) => visitor.visit_val_use(val),
+            ReducedVal::Load { addr, .. } => visitor.visit_val_use(addr),
+        }
+    }
+}
+
+impl ReducedVal {
+    fn subst<P>(mut self, cx: &mut Cx<P>, base: &State) -> Self {
+        self = match self {
+            ReducedVal::Simple(val) => ReducedVal::Simple(val.subst(cx, base)),
+            ReducedVal::Load { addr, size } => ReducedVal::Load {
+                addr: addr.subst(cx, base),
+                size,
+            },
+        };
+
+        // HACK(eddyb) try to get the last stored value.
+        loop {
+            let (mem, addr, size) = match self {
+                ReducedVal::Simple(val) => match cx[val] {
+                    Val::Load(r) => (r.mem, r.addr, r.size),
+                    _ => break,
+                },
+                ReducedVal::Load { addr, size } => (base.mem, addr, size),
+            };
+            match cx[mem].guess_load(cx, addr, size) {
+                Some(v) => self = ReducedVal::Simple(v),
+                None => {
+                    // Replace `ReducedVal::Simple(Load(_))` with
+                    // `ReducedVal::Load`, to ignore the base memory.
+                    self = ReducedVal::Load { addr, size };
+                    break;
+                }
+            }
+        }
+
+        self
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+struct DynTarget {
+    val: ReducedVal,
+
+    /// The number of dynamic jumps this target
+    /// was found behind.
+    /// E.g. for `x: call a; y: call b; z: ret`,
+    /// assuming `a` and `b` are leaf functions,
+    /// the `ret` target has depth `0` at `z`,
+    /// `1` at `y` and `2` at `x`.
+    depth: u32,
+}
+
+impl Visit for DynTarget {
+    fn walk(&self, visitor: &mut impl Visitor) {
+        self.val.visit(visitor);
+    }
+}
+
+#[derive(Copy, Clone)]
+struct Cyclic;
 
 pub struct Explorer<'a, P> {
     pub cx: &'a mut Cx<P>,
-    pub blocks: BTreeMap<Const, Block>,
-    preds: HashMap<Const, BTreeSet<Const>>,
+    pub blocks: BTreeMap<BlockId, Block>,
 
-    seen_bb: HashSet<Const>,
-    queue: VecDeque<(Const, Const)>,
-    non_const_targets: Vec<(Const, Use<Val>)>,
+    dyn_target_cache: HashMap<(Option<DynTarget>, BlockId), Result<Set1<DynTarget>, Cyclic>>,
 }
 
 impl<'a, P: Platform> Explorer<'a, P> {
@@ -16,19 +133,16 @@ impl<'a, P: Platform> Explorer<'a, P> {
         Explorer {
             cx,
             blocks: BTreeMap::new(),
-            preds: HashMap::new(),
-            seen_bb: HashSet::new(),
-            queue: VecDeque::new(),
-            non_const_targets: vec![],
+            dyn_target_cache: HashMap::new(),
         }
     }
 
-    pub fn get_or_lift_block(&mut self, entry_pc: Const) -> &Block {
+    pub fn get_or_lift_block(&mut self, bb: BlockId) -> &Block {
         // FIXME(eddyb) clean this up whenever NLL/Polonius can do the
         // efficient check (`if let Some(x) = map.get(k) { return x; }`).
-        if !self.blocks.contains_key(&entry_pc) {
+        if !self.blocks.contains_key(&bb) {
             let mut state = self.cx.default.clone();
-            let mut pc = entry_pc;
+            let mut pc = Const::new(P::Arch::ADDR_SIZE, bb.entry_pc);
             let effect = loop {
                 match P::Arch::lift_instr(self.cx, &mut pc, &mut state) {
                     Some(effect) => break effect,
@@ -36,13 +150,13 @@ impl<'a, P: Platform> Explorer<'a, P> {
                 }
 
                 // Prevent blocks from overlapping where possible.
-                if self.blocks.contains_key(&pc) {
+                if self.blocks.contains_key(&BlockId::from(pc)) {
                     break Effect::Jump(self.cx.a(pc));
                 }
             };
 
             self.blocks.insert(
-                entry_pc,
+                bb,
                 Block {
                     pc: ..pc,
                     state: ..state,
@@ -50,117 +164,136 @@ impl<'a, P: Platform> Explorer<'a, P> {
                 },
             );
         }
-        &self.blocks[&entry_pc]
+        &self.blocks[&bb]
     }
 
-    pub fn explore_bbs(&mut self, entry_bb: Const) {
-        if self.seen_bb.insert(entry_bb) {
-            self.explore_bb(entry_bb);
-        }
+    pub fn explore_bbs(&mut self, entry_pc: Const) {
+        let entry_bb = BlockId::from(entry_pc);
 
         loop {
-            let mut changed = false;
-            while let Some((source_bb, bb)) = self.queue.pop_front() {
-                if self.seen_bb.insert(bb) {
-                    self.explore_bb(bb);
-                    changed = true;
-                }
-                changed |= self.preds.entry(bb).or_default().insert(source_bb);
-            }
-            if !changed {
+            let num_blocks = self.blocks.len();
+            self.bb_dyn_targets(None, entry_bb);
+
+            // TODO(eddyb) split blocks that overlap other blocks.
+
+            if self.blocks.len() == num_blocks {
                 break;
             }
-            for &(bb, target) in &self.non_const_targets {
-                TargetSearcher {
-                    cx: self.cx,
-                    blocks: &self.blocks,
-                    preds: &self.preds,
-                    queue: &mut self.queue,
-
-                    bb,
-                    stack: vec![],
-                }
-                .search(bb, target);
-            }
+            self.dyn_target_cache.clear();
         }
     }
 
-    fn explore_bb(&mut self, bb: Const) {
+    // FIXME(eddyb) reuse cached value when it doesn't interact with `replacement`.
+    fn bb_dyn_targets(
+        &mut self,
+        replacement: Option<DynTarget>,
+        bb: BlockId,
+    ) -> (Set1<DynTarget>, Option<Cyclic>) {
+        match self.dyn_target_cache.entry((replacement, bb)) {
+            Entry::Occupied(entry) => {
+                let r = entry.get();
+                return (r.unwrap_or(Set1::Empty), r.err());
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(Err(Cyclic));
+            }
+        }
+
         let effect = self.get_or_lift_block(bb).effect;
-        let mut enqueue = |target: Use<Val>| {
-            if let Some(target) = self.cx[target].as_const() {
-                self.queue.push_back((bb, target));
+        let mut dyn_targets_of_target = |target: Use<Val>| {
+            if let Some(target_bb) = self.cx[target].as_const().map(BlockId::from) {
+                let (mut dyn_targets, cyclic) = self.bb_dyn_targets(replacement, target_bb);
+
+                if let Set1::One(target) = &mut dyn_targets {
+                    target.val = target.val.subst(self.cx, &self.blocks[&bb].state.end);
+                }
+
+                (dyn_targets, cyclic)
             } else {
-                self.non_const_targets.push((bb, target))
+                let target = match replacement {
+                    Some(DynTarget { val, depth: 0 }) => {
+                        val.subst(self.cx, &self.blocks[&bb].state.end)
+                    }
+                    _ => ReducedVal::Simple(target),
+                };
+                (
+                    Set1::One(DynTarget {
+                        val: target,
+                        depth: 0,
+                    }),
+                    None,
+                )
             }
         };
-        match effect {
-            Effect::Jump(target) => {
-                enqueue(target);
-            }
+        let (mut dyn_targets, mut cyclic) = match effect {
+            Effect::Jump(target) => dyn_targets_of_target(target),
             Effect::Branch { t, e, .. } => {
-                enqueue(t);
-                enqueue(e);
+                let (t_dyn_targets, t_cyclic) = dyn_targets_of_target(t);
+                let (e_dyn_targets, e_cyclic) = dyn_targets_of_target(e);
+                (t_dyn_targets.union(e_dyn_targets), t_cyclic.or(e_cyclic))
             }
             Effect::PlatformCall { ret_pc, .. } => {
-                self.queue.push_back((bb, ret_pc));
+                self.bb_dyn_targets(replacement, BlockId::from(ret_pc))
             }
-            Effect::Trap { .. } => {}
-        }
-    }
-}
+            Effect::Trap { .. } => (Set1::Empty, None),
+        };
 
-struct TargetSearcher<'a, P> {
-    cx: &'a mut Cx<P>,
-    blocks: &'a BTreeMap<Const, Block>,
-    preds: &'a HashMap<Const, BTreeSet<Const>>,
+        // Propagate the value backwards through this BB.
+        if let Set1::One(target) = &mut dyn_targets {
+            let const_target = match target.val {
+                ReducedVal::Simple(val) => self.cx[val].as_const(),
+                _ => None,
+            };
+            if let Some(target_bb) = const_target.map(BlockId::from) {
+                // Recurse on the indirect target.
+                let target_replacement = replacement.and_then(|DynTarget { val, depth }| {
+                    if depth == target.depth {
+                        panic!(
+                            "explore: {:?} -> {:?} still constant after having been replaced",
+                            bb, target
+                        );
+                    }
+                    depth
+                        .checked_sub(target.depth + 1)
+                        .map(|depth| DynTarget { val, depth })
+                });
+                match self.bb_dyn_targets(target_replacement, target_bb) {
+                    (Set1::One(target_target), target_cyclic) => {
+                        cyclic = cyclic.or(target_cyclic);
+                        target.val = target_target.val;
 
-    queue: &'a mut VecDeque<(Const, Const)>,
-
-    bb: Const,
-    stack: Vec<Const>,
-}
-
-impl<P> TargetSearcher<'_, P> {
-    fn search(&mut self, cur_bb: Const, target: Use<Val>) {
-        if let Some(target) = self.cx[target].as_const() {
-            self.queue.push_back((self.bb, target));
-            return;
-        }
-
-        // HACK(eddyb) avoid deep backtracking.
-        if self.stack.len() > 16 {
-            return;
-        }
-
-        if self.stack.contains(&cur_bb) {
-            return;
-        }
-
-        self.stack.push(cur_bb);
-
-        if let Some(preds) = self.preds.get(&cur_bb) {
-            for &pred in preds {
-                let mut target = target.subst(self.cx, &self.blocks[&pred].state.end);
-
-                // HACK(eddyb) try to get the last stored value.
-                while let Val::Load(r) = self.cx[target] {
-                    match self.cx[r.mem].guess_load(self.cx, r.addr, r.size) {
-                        Some(v) => target = v,
-                        None => break,
+                        // Recompute the current BB, replacing the target with
+                        // the target BB's target, to get the final target.
+                        match self.bb_dyn_targets(Some(*target), bb) {
+                            (Set1::One(final_target), final_cyclic) => {
+                                cyclic = cyclic.or(final_cyclic);
+                                target.val = final_target.val;
+                                assert_eq!(target.depth, final_target.depth);
+                                target.depth += target_target.depth + 1;
+                            }
+                            _ => {
+                                dyn_targets = Set1::Empty;
+                            }
+                        }
+                    }
+                    _ => {
+                        dyn_targets = Set1::Empty;
                     }
                 }
-
-                self.search(pred, target);
             }
-        } else {
-            println!(
-                "explore: {:?} jumps to unknown {}",
-                self.bb,
-                self.cx.pretty_print(&self.cx[target], None)
-            );
         }
 
-        self.stack.pop();
+        // Cycles are irrelevant if we're already dealing with more than one value.
+        if let Set1::Many = dyn_targets {
+            cyclic = None;
+        }
+
+        // Only cache results not tainted by cycles.
+        if cyclic.is_none() {
+            self.dyn_target_cache
+                .insert((replacement, bb), Ok(dyn_targets));
+        }
+
+        (dyn_targets, cyclic)
     }
 }

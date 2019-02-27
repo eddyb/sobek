@@ -1,6 +1,7 @@
 use crate::ir::{
-    Arch, BitSize::*, Const, Cx, Effect, IntOp, Mem, MemRef, MemSize, Platform, Reg, Rom, State,
-    Use, Val,
+    Arch,
+    BitSize::{self, *},
+    Const, Cx, Effect, IntOp, Mem, MemRef, MemSize, Platform, Reg, Rom, State, Use, Val,
 };
 use std::iter;
 
@@ -15,6 +16,8 @@ impl State {
 }
 
 impl Arch for Mips32 {
+    const ADDR_SIZE: BitSize = B32;
+
     fn default_regs(cx: &mut Cx<impl Platform<Arch = Self>>) -> Vec<Use<Val>> {
         iter::once(Val::Const(Const::new(B32, 0)))
             .chain((1..32).map(|i| {

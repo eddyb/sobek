@@ -882,6 +882,8 @@ pub struct Block {
 }
 
 pub trait Arch: Sized {
+    const ADDR_SIZE: BitSize;
+
     fn default_regs(cx: &mut Cx<impl Platform<Arch = Self>>) -> Vec<Use<Val>>;
 
     fn lift_instr(
