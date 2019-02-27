@@ -172,7 +172,14 @@ impl<'a, P: Platform> Explorer<'a, P> {
 
         loop {
             let num_blocks = self.blocks.len();
-            self.bb_dyn_targets(None, entry_bb);
+            let (dyn_targets, _) = self.bb_dyn_targets(None, entry_bb);
+            if let Set1::One(target) = dyn_targets {
+                println!(
+                    "explore: entry {:?} reaches unknown target {}",
+                    entry_bb,
+                    self.cx.pretty_print(&target, None)
+                );
+            }
 
             // TODO(eddyb) split blocks that overlap other blocks.
 
@@ -228,8 +235,27 @@ impl<'a, P: Platform> Explorer<'a, P> {
         let (mut dyn_targets, mut cyclic) = match effect {
             Effect::Jump(target) => dyn_targets_of_target(target),
             Effect::Branch { t, e, .. } => {
-                let (t_dyn_targets, t_cyclic) = dyn_targets_of_target(t);
-                let (e_dyn_targets, e_cyclic) = dyn_targets_of_target(e);
+                let (mut t_dyn_targets, t_cyclic) = dyn_targets_of_target(t);
+                let (mut e_dyn_targets, e_cyclic) = dyn_targets_of_target(e);
+                if let (Set1::One(t), Set1::One(e)) = (&mut t_dyn_targets, &mut e_dyn_targets) {
+                    if t.val == e.val && t.depth != e.depth {
+                        let depth = t.depth.max(e.depth);
+                        println!(
+                            "explore: {:?}: mismatched depth: {} vs {}, picking {}",
+                            bb, t.depth, e.depth, depth,
+                        );
+                        t.depth = depth;
+                        e.depth = depth;
+                    }
+                    if t != e {
+                        println!(
+                            "explore: {:?}: ambiguous dyn targets: {} vs {}",
+                            bb,
+                            self.cx.pretty_print(&*t, None),
+                            self.cx.pretty_print(&*e, None)
+                        );
+                    }
+                }
                 (t_dyn_targets.union(e_dyn_targets), t_cyclic.or(e_cyclic))
             }
             Effect::PlatformCall { ret_pc, .. } => {
