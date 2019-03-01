@@ -128,11 +128,44 @@ impl Visit for DynTarget {
 #[derive(Copy, Clone)]
 struct Partial;
 
+/// The cumulative exit "continuation" of a (sub-)CFG,
+/// computed from all the jumps that don't resolve to
+/// a static target.
+struct Exit {
+    /// Set of non-constant jump destination values.
+    /// An empty set indicates the (sub-)CFG diverges, by
+    /// eventually reaching infinite loops and/or traps.
+    targets: Set1<DynTarget>,
+
+    /// Indicates whether this (sub-)CFG contains unresolved
+    /// cycles, which may have resulted in the computed exit
+    /// being different from the eventual fixpoint.
+    partial: Option<Partial>,
+}
+
+impl Exit {
+    fn merge(self, other: Self) -> Self {
+        Exit {
+            targets: self.targets.union(other.targets),
+            partial: self.partial.or(other.partial),
+        }
+    }
+
+    fn flat_map_targets(mut self, f: impl FnOnce(DynTarget) -> Self) -> Self {
+        self.targets = self.targets.flat_map(|target| {
+            let Exit { targets, partial } = f(target);
+            self.partial = self.partial.or(partial);
+            targets
+        });
+        self
+    }
+}
+
 pub struct Explorer<'a, P> {
     pub cx: &'a mut Cx<P>,
     pub blocks: BTreeMap<BlockId, Block>,
 
-    dyn_target_cache: HashMap<(Option<DynTarget>, BlockId), Result<Set1<DynTarget>, Partial>>,
+    exit_cache: HashMap<(Option<DynTarget>, BlockId), Result<Set1<DynTarget>, Partial>>,
 }
 
 impl<'a, P: Platform> Explorer<'a, P> {
@@ -140,7 +173,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
         Explorer {
             cx,
             blocks: BTreeMap::new(),
-            dyn_target_cache: HashMap::new(),
+            exit_cache: HashMap::new(),
         }
     }
 
@@ -179,10 +212,10 @@ impl<'a, P: Platform> Explorer<'a, P> {
 
         loop {
             let num_blocks = self.blocks.len();
-            let (dyn_targets, _) = self.bb_dyn_targets(None, entry_bb);
-            if let Set1::One(target) = dyn_targets {
+            let exit = self.find_exit(None, entry_bb);
+            if let Set1::One(target) = exit.targets {
                 println!(
-                    "explore: entry {:?} reaches unknown target {}",
+                    "explore: entry {:?} reaches unknown exit target {}",
                     entry_bb,
                     self.cx.pretty_print(&target, None)
                 );
@@ -193,20 +226,19 @@ impl<'a, P: Platform> Explorer<'a, P> {
             if self.blocks.len() == num_blocks {
                 break;
             }
-            self.dyn_target_cache.clear();
+            self.exit_cache.clear();
         }
     }
 
     // FIXME(eddyb) reuse cached value when it doesn't interact with `replacement`.
-    fn bb_dyn_targets(
-        &mut self,
-        replacement: Option<DynTarget>,
-        bb: BlockId,
-    ) -> (Set1<DynTarget>, Option<Partial>) {
-        match self.dyn_target_cache.entry((replacement, bb)) {
+    fn find_exit(&mut self, replacement: Option<DynTarget>, bb: BlockId) -> Exit {
+        match self.exit_cache.entry((replacement, bb)) {
             Entry::Occupied(entry) => {
                 let r = entry.get();
-                return (r.unwrap_or(Set1::Empty), r.err());
+                return Exit {
+                    targets: r.unwrap_or(Set1::Empty),
+                    partial: r.err(),
+                };
             }
             Entry::Vacant(entry) => {
                 entry.insert(Err(Partial));
@@ -214,15 +246,16 @@ impl<'a, P: Platform> Explorer<'a, P> {
         }
 
         let effect = self.get_or_lift_block(bb).effect;
-        let mut dyn_targets_of_target = |target: Use<Val>| {
+        let mut exit_from_target = |target: Use<Val>| {
             if let Some(target_bb) = self.cx[target].as_const().map(BlockId::from) {
-                let (mut dyn_targets, partial) = self.bb_dyn_targets(replacement, target_bb);
+                let mut exit = self.find_exit(replacement, target_bb);
 
-                if let Set1::One(target) = &mut dyn_targets {
+                // Propagate the value backwards through this BB.
+                if let Set1::One(target) = &mut exit.targets {
                     target.val = target.val.subst(self.cx, &self.blocks[&bb].state.end);
                 }
 
-                (dyn_targets, partial)
+                exit
             } else {
                 let target = match replacement {
                     Some(DynTarget { val, depth: 0 }) => {
@@ -230,21 +263,21 @@ impl<'a, P: Platform> Explorer<'a, P> {
                     }
                     _ => ReducedVal::Simple(target),
                 };
-                (
-                    Set1::One(DynTarget {
+                Exit {
+                    targets: Set1::One(DynTarget {
                         val: target,
                         depth: 0,
                     }),
-                    None,
-                )
+                    partial: None,
+                }
             }
         };
-        let (mut dyn_targets, mut partial) = match effect {
-            Effect::Jump(target) => dyn_targets_of_target(target),
+        let mut exit = match effect {
+            Effect::Jump(target) => exit_from_target(target),
             Effect::Branch { t, e, .. } => {
-                let (mut t_dyn_targets, t_partial) = dyn_targets_of_target(t);
-                let (mut e_dyn_targets, e_partial) = dyn_targets_of_target(e);
-                if let (Set1::One(t), Set1::One(e)) = (&mut t_dyn_targets, &mut e_dyn_targets) {
+                let mut t_exit = exit_from_target(t);
+                let mut e_exit = exit_from_target(e);
+                if let (Set1::One(t), Set1::One(e)) = (&mut t_exit.targets, &mut e_exit.targets) {
                     if t.val == e.val && t.depth != e.depth {
                         let depth = t.depth.max(e.depth);
                         println!(
@@ -263,16 +296,18 @@ impl<'a, P: Platform> Explorer<'a, P> {
                         );
                     }
                 }
-                (t_dyn_targets.union(e_dyn_targets), t_partial.or(e_partial))
+                t_exit.merge(e_exit)
             }
             Effect::PlatformCall { ret_pc, .. } => {
-                self.bb_dyn_targets(replacement, BlockId::from(ret_pc))
+                self.find_exit(replacement, BlockId::from(ret_pc))
             }
-            Effect::Trap { .. } => (Set1::Empty, None),
+            Effect::Trap { .. } => Exit {
+                targets: Set1::Empty,
+                partial: None,
+            },
         };
 
-        // Propagate the value backwards through this BB.
-        if let Set1::One(target) = dyn_targets {
+        exit = exit.flat_map_targets(|target| {
             let const_target = match target.val {
                 ReducedVal::Simple(val) => self.cx[val].as_const(),
                 _ => None,
@@ -290,42 +325,46 @@ impl<'a, P: Platform> Explorer<'a, P> {
                         .checked_sub(target.depth + 1)
                         .map(|depth| DynTarget { val, depth })
                 });
-                let (target_target, target_partial) =
-                    self.bb_dyn_targets(target_replacement, target_bb);
-                partial = partial.or(target_partial);
-                dyn_targets = target_target.flat_map(|target_target| {
-                    // Recompute the current BB, replacing the target with
-                    // the target BB's target, to get the final target.
-                    let (final_target, final_partial) = self.bb_dyn_targets(
-                        Some(DynTarget {
-                            val: target_target.val,
-                            depth: target.depth,
-                        }),
-                        bb,
-                    );
-                    partial = partial.or(final_partial);
-                    final_target.flat_map(|final_target| {
-                        assert_eq!(target.depth, final_target.depth);
-                        Set1::One(DynTarget {
-                            val: final_target.val,
-                            depth: target.depth + target_target.depth + 1,
+                self.find_exit(target_replacement, target_bb)
+                    .flat_map_targets(|target_target| {
+                        // Recompute the current BB, replacing the target with
+                        // the target BB's target, to get the final target.
+                        self.find_exit(
+                            Some(DynTarget {
+                                val: target_target.val,
+                                depth: target.depth,
+                            }),
+                            bb,
+                        )
+                        .flat_map_targets(|final_target| {
+                            assert_eq!(target.depth, final_target.depth);
+                            Exit {
+                                targets: Set1::One(DynTarget {
+                                    val: final_target.val,
+                                    depth: target.depth + target_target.depth + 1,
+                                }),
+                                partial: None,
+                            }
                         })
                     })
-                });
+            } else {
+                Exit {
+                    targets: Set1::One(target),
+                    partial: None,
+                }
             }
-        }
+        });
 
         // Cycles are irrelevant if we're already fully general.
-        if let Set1::Many = dyn_targets {
-            partial = None;
+        if let Set1::Many = exit.targets {
+            exit.partial = None;
         }
 
         // Only cache final results.
-        if partial.is_none() {
-            self.dyn_target_cache
-                .insert((replacement, bb), Ok(dyn_targets));
+        if exit.partial.is_none() {
+            self.exit_cache.insert((replacement, bb), Ok(exit.targets));
         }
 
-        (dyn_targets, partial)
+        exit
     }
 }
