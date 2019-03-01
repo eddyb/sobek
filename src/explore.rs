@@ -134,13 +134,10 @@ impl Visit for DynTarget {
     }
 }
 
-// TODO(eddyb) find a better name for this.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-struct ExitKey {
+/// Options for handling an exit "continuation".
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+struct ExitOptions {
     replacement: Option<DynTarget>,
-
-    /// Root block of the (sub-)CFG.
-    bb: BlockId,
 }
 
 struct Partial {
@@ -187,7 +184,7 @@ pub struct Explorer<'a, P> {
     pub cx: &'a mut Cx<P>,
     pub blocks: BTreeMap<BlockId, Block>,
 
-    exit_cache: HashMap<ExitKey, Exit>,
+    exit_cache: HashMap<(BlockId, ExitOptions), Exit>,
 }
 
 impl<'a, P: Platform> Explorer<'a, P> {
@@ -234,7 +231,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
 
         loop {
             let num_blocks = self.blocks.len();
-            let exit = self.find_exit(None, entry_bb);
+            let exit = self.find_exit(entry_bb, ExitOptions::default());
             exit.targets.map(|target| {
                 println!(
                     "explore: entry {:?} reaches unknown exit target {}",
@@ -252,11 +249,11 @@ impl<'a, P: Platform> Explorer<'a, P> {
         }
     }
 
-    fn find_exit_uncached(&mut self, replacement: Option<DynTarget>, bb: BlockId) -> Exit {
+    fn find_exit_uncached(&mut self, bb: BlockId, options: ExitOptions) -> Exit {
         let effect = self.get_or_lift_block(bb).effect;
         let mut exit_from_target = |target: Use<Val>| {
             if let Some(target_bb) = self.cx[target].as_const().map(BlockId::from) {
-                let mut exit = self.find_exit(replacement, target_bb);
+                let mut exit = self.find_exit(target_bb, options);
 
                 // Propagate the value backwards through this BB.
                 exit.targets = exit.targets.map(|mut target| {
@@ -266,7 +263,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
 
                 exit
             } else {
-                let target = match replacement {
+                let target = match options.replacement {
                     Some(DynTarget { val, depth: 0 }) => {
                         val.subst(self.cx, &self.blocks[&bb].state.end)
                     }
@@ -307,9 +304,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
                 }
                 t_exit.merge(e_exit)
             }
-            Effect::PlatformCall { ret_pc, .. } => {
-                self.find_exit(replacement, BlockId::from(ret_pc))
-            }
+            Effect::PlatformCall { ret_pc, .. } => self.find_exit(BlockId::from(ret_pc), options),
             Effect::Trap { .. } => Exit {
                 targets: Set1::Empty,
                 partial: None,
@@ -323,27 +318,31 @@ impl<'a, P: Platform> Explorer<'a, P> {
             };
             if let Some(target_bb) = const_target.map(BlockId::from) {
                 // Recurse on the indirect target.
-                let target_replacement = replacement.and_then(|DynTarget { val, depth }| {
-                    if depth == target.depth {
-                        panic!(
-                            "explore: {:?} -> {:?} still constant after having been replaced",
-                            bb, target
-                        );
-                    }
-                    depth
-                        .checked_sub(target.depth + 1)
-                        .map(|depth| DynTarget { val, depth })
-                });
-                self.find_exit(target_replacement, target_bb)
+                let target_options = ExitOptions {
+                    replacement: options.replacement.and_then(|DynTarget { val, depth }| {
+                        if depth == target.depth {
+                            panic!(
+                                "explore: {:?} -> {:?} still constant after having been replaced",
+                                bb, target
+                            );
+                        }
+                        depth
+                            .checked_sub(target.depth + 1)
+                            .map(|depth| DynTarget { val, depth })
+                    }),
+                };
+                self.find_exit(target_bb, target_options)
                     .flat_map_targets(|target_target| {
                         // Recompute the current BB, replacing the target with
                         // the target BB's target, to get the final target.
                         self.find_exit(
-                            Some(DynTarget {
-                                val: target_target.val,
-                                depth: target.depth,
-                            }),
                             bb,
+                            ExitOptions {
+                                replacement: Some(DynTarget {
+                                    val: target_target.val,
+                                    depth: target.depth,
+                                }),
+                            },
                         )
                         .flat_map_targets(|final_target| {
                             assert_eq!(target.depth, final_target.depth);
@@ -373,9 +372,8 @@ impl<'a, P: Platform> Explorer<'a, P> {
     }
 
     // FIXME(eddyb) reuse cached value when it doesn't interact with `replacement`.
-    fn find_exit(&mut self, replacement: Option<DynTarget>, bb: BlockId) -> Exit {
-        let key = ExitKey { replacement, bb };
-        match self.exit_cache.entry(key) {
+    fn find_exit(&mut self, bb: BlockId, options: ExitOptions) -> Exit {
+        match self.exit_cache.entry((bb, options)) {
             Entry::Occupied(mut entry) => {
                 let cached = entry.get_mut();
                 return Exit {
@@ -399,9 +397,9 @@ impl<'a, P: Platform> Explorer<'a, P> {
         // It *might* be the case that not caching a partial value
         // (i.e. the `entry.remove()` call) has a similar effect?
         loop {
-            let exit = self.find_exit_uncached(replacement, bb);
+            let exit = self.find_exit_uncached(bb, options);
 
-            let mut entry = match self.exit_cache.entry(key) {
+            let mut entry = match self.exit_cache.entry((bb, options)) {
                 Entry::Occupied(entry) => entry,
                 Entry::Vacant(_) => unreachable!(),
             };
