@@ -216,24 +216,14 @@ impl<'a, P: Platform> Explorer<'a, P> {
     pub fn explore_bbs(&mut self, entry_pc: Const) {
         let entry_bb = BlockId::from(entry_pc);
 
-        loop {
-            let num_blocks = self.blocks.len();
-            let exit = self.find_exit(entry_bb, ExitOptions::default());
-            exit.targets.map(|target| {
-                println!(
-                    "explore: entry {:?} reaches unknown exit target {}",
-                    entry_bb,
-                    self.cx.pretty_print(&target, None)
-                );
-            });
-
-            // TODO(eddyb) split blocks that overlap other blocks.
-
-            if self.blocks.len() == num_blocks {
-                break;
-            }
-            self.exit_cache.clear();
-        }
+        let exit = self.find_exit(entry_bb, ExitOptions::default());
+        exit.targets.map(|target| {
+            println!(
+                "explore: entry {:?} reaches unknown exit target {}",
+                entry_bb,
+                self.cx.pretty_print(&target, None)
+            );
+        });
     }
 
     fn find_exit_uncached_from_effect(&mut self, bb: BlockId, options: ExitOptions) -> Exit {
