@@ -134,6 +134,15 @@ impl Visit for DynTarget {
     }
 }
 
+// TODO(eddyb) find a better name for this.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+struct ExitKey {
+    replacement: Option<DynTarget>,
+
+    /// Root block of the (sub-)CFG.
+    bb: BlockId,
+}
+
 struct Partial {
     /// Set to `true` when a cached partial value is used.
     observed: bool,
@@ -178,7 +187,7 @@ pub struct Explorer<'a, P> {
     pub cx: &'a mut Cx<P>,
     pub blocks: BTreeMap<BlockId, Block>,
 
-    exit_cache: HashMap<(Option<DynTarget>, BlockId), Exit>,
+    exit_cache: HashMap<ExitKey, Exit>,
 }
 
 impl<'a, P: Platform> Explorer<'a, P> {
@@ -365,7 +374,8 @@ impl<'a, P: Platform> Explorer<'a, P> {
 
     // FIXME(eddyb) reuse cached value when it doesn't interact with `replacement`.
     fn find_exit(&mut self, replacement: Option<DynTarget>, bb: BlockId) -> Exit {
-        match self.exit_cache.entry((replacement, bb)) {
+        let key = ExitKey { replacement, bb };
+        match self.exit_cache.entry(key) {
             Entry::Occupied(mut entry) => {
                 let cached = entry.get_mut();
                 return Exit {
@@ -391,7 +401,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
         loop {
             let exit = self.find_exit_uncached(replacement, bb);
 
-            let mut entry = match self.exit_cache.entry((replacement, bb)) {
+            let mut entry = match self.exit_cache.entry(key) {
                 Entry::Occupied(entry) => entry,
                 Entry::Vacant(_) => unreachable!(),
             };
