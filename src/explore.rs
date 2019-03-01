@@ -363,6 +363,8 @@ impl<'a, P: Platform> Explorer<'a, P> {
         // Only cache final results.
         if exit.partial.is_none() {
             self.exit_cache.insert((replacement, bb), Ok(exit.targets));
+        } else {
+            self.exit_cache.remove(&(replacement, bb));
         }
 
         exit
