@@ -610,7 +610,7 @@ impl Val {
                 (IntOp::Add, Val::Int(IntOp::Add, _, a, b), Val::Const(y)) => {
                     if let Val::Const(x) = cx[b] {
                         if let Some(xy) = IntOp::Add.eval(x, y) {
-                            return Ok(Val::Int(IntOp::Add, size, a, cx.a(xy)));
+                            return Val::Int(IntOp::Add, size, a, cx.a(xy)).normalize(cx);
                         }
                     }
                 }
