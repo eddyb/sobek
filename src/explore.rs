@@ -3,9 +3,9 @@ use crate::ir::{
 };
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
-use std::fmt;
+use std::{fmt, mem};
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Set1<T> {
     Empty,
     One(T),
@@ -30,9 +30,18 @@ impl<T: Eq> Set1<T> {
         self
     }
 
-    fn flat_map(self, f: impl FnOnce(T) -> Self) -> Self {
+    fn map<U>(self, f: impl FnOnce(T) -> U) -> Set1<U> {
         match self {
-            Set1::Empty | Set1::Many => self,
+            Set1::Empty => Set1::Empty,
+            Set1::Many => Set1::Many,
+            Set1::One(x) => Set1::One(f(x)),
+        }
+    }
+
+    fn flat_map<U>(self, f: impl FnOnce(T) -> Set1<U>) -> Set1<U> {
+        match self {
+            Set1::Empty => Set1::Empty,
+            Set1::Many => Set1::Many,
             Set1::One(x) => f(x),
         }
     }
@@ -125,8 +134,10 @@ impl Visit for DynTarget {
     }
 }
 
-#[derive(Copy, Clone)]
-struct Partial;
+struct Partial {
+    /// Set to `true` when a cached partial value is used.
+    observed: bool,
+}
 
 /// The cumulative exit "continuation" of a (sub-)CFG,
 /// computed from all the jumps that don't resolve to
@@ -154,7 +165,9 @@ impl Exit {
     fn flat_map_targets(mut self, f: impl FnOnce(DynTarget) -> Self) -> Self {
         self.targets = self.targets.flat_map(|target| {
             let Exit { targets, partial } = f(target);
-            self.partial = self.partial.or(partial);
+            if self.partial.is_none() {
+                self.partial = partial;
+            }
             targets
         });
         self
@@ -165,7 +178,7 @@ pub struct Explorer<'a, P> {
     pub cx: &'a mut Cx<P>,
     pub blocks: BTreeMap<BlockId, Block>,
 
-    exit_cache: HashMap<(Option<DynTarget>, BlockId), Result<Set1<DynTarget>, Partial>>,
+    exit_cache: HashMap<(Option<DynTarget>, BlockId), Exit>,
 }
 
 impl<'a, P: Platform> Explorer<'a, P> {
@@ -213,13 +226,13 @@ impl<'a, P: Platform> Explorer<'a, P> {
         loop {
             let num_blocks = self.blocks.len();
             let exit = self.find_exit(None, entry_bb);
-            if let Set1::One(target) = exit.targets {
+            exit.targets.map(|target| {
                 println!(
                     "explore: entry {:?} reaches unknown exit target {}",
                     entry_bb,
                     self.cx.pretty_print(&target, None)
                 );
-            }
+            });
 
             // TODO(eddyb) split blocks that overlap other blocks.
 
@@ -230,30 +243,17 @@ impl<'a, P: Platform> Explorer<'a, P> {
         }
     }
 
-    // FIXME(eddyb) reuse cached value when it doesn't interact with `replacement`.
-    fn find_exit(&mut self, replacement: Option<DynTarget>, bb: BlockId) -> Exit {
-        match self.exit_cache.entry((replacement, bb)) {
-            Entry::Occupied(entry) => {
-                let r = entry.get();
-                return Exit {
-                    targets: r.unwrap_or(Set1::Empty),
-                    partial: r.err(),
-                };
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(Err(Partial));
-            }
-        }
-
+    fn find_exit_uncached(&mut self, replacement: Option<DynTarget>, bb: BlockId) -> Exit {
         let effect = self.get_or_lift_block(bb).effect;
         let mut exit_from_target = |target: Use<Val>| {
             if let Some(target_bb) = self.cx[target].as_const().map(BlockId::from) {
                 let mut exit = self.find_exit(replacement, target_bb);
 
                 // Propagate the value backwards through this BB.
-                if let Set1::One(target) = &mut exit.targets {
+                exit.targets = exit.targets.map(|mut target| {
                     target.val = target.val.subst(self.cx, &self.blocks[&bb].state.end);
-                }
+                    target
+                });
 
                 exit
             } else {
@@ -360,13 +360,74 @@ impl<'a, P: Platform> Explorer<'a, P> {
             exit.partial = None;
         }
 
-        // Only cache final results.
-        if exit.partial.is_none() {
-            self.exit_cache.insert((replacement, bb), Ok(exit.targets));
-        } else {
-            self.exit_cache.remove(&(replacement, bb));
+        exit
+    }
+
+    // FIXME(eddyb) reuse cached value when it doesn't interact with `replacement`.
+    fn find_exit(&mut self, replacement: Option<DynTarget>, bb: BlockId) -> Exit {
+        match self.exit_cache.entry((replacement, bb)) {
+            Entry::Occupied(mut entry) => {
+                let cached = entry.get_mut();
+                return Exit {
+                    targets: cached.targets,
+                    partial: cached.partial.as_mut().map(|partial| {
+                        partial.observed = true;
+                        Partial { observed: false }
+                    }),
+                };
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(Exit {
+                    targets: Set1::Empty,
+                    partial: Some(Partial { observed: false }),
+                });
+            }
         }
 
-        exit
+        // TODO(eddyb) actually show that retrying `find_exit_uncached`
+        // has *any* effect on the overall results!
+        // It *might* be the case that not caching a partial value
+        // (i.e. the `entry.remove()` call) has a similar effect?
+        loop {
+            let exit = self.find_exit_uncached(replacement, bb);
+
+            let mut entry = match self.exit_cache.entry((replacement, bb)) {
+                Entry::Occupied(entry) => entry,
+                Entry::Vacant(_) => unreachable!(),
+            };
+            let cached = entry.get_mut();
+            let old_targets = mem::replace(&mut cached.targets, exit.targets).map(|target| {
+                // HACK(eddyb) erase the depth to avoid runaway behavior
+                target.val
+            });
+            let old_observed = mem::replace(&mut cached.partial.as_mut().unwrap().observed, false);
+
+            // Keep retrying as long as a now-obsolete `targets` was observed.
+            // TODO(eddyb) how should fixpoint be detected?
+            // Can't assume that a certain `targets` set is final,
+            // as there could be outer cycles blocking progress.
+            if old_observed
+                && old_targets
+                    != exit.targets.map(|target| {
+                        // HACK(eddyb) erase the depth to avoid runaway behavior
+                        target.val
+                    })
+            {
+                continue;
+            }
+
+            // Only cache final results.
+            if let Some(partial) = &exit.partial {
+                // The `observed` flag should only ever be set for
+                // the `Exit` inside the cache, but nothing else.
+                assert_eq!(partial.observed, false);
+
+                entry.remove();
+            } else {
+                cached.partial.take();
+            }
+
+            return exit;
+        }
     }
 }
