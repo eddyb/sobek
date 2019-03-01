@@ -126,13 +126,13 @@ impl Visit for DynTarget {
 }
 
 #[derive(Copy, Clone)]
-struct Cyclic;
+struct Partial;
 
 pub struct Explorer<'a, P> {
     pub cx: &'a mut Cx<P>,
     pub blocks: BTreeMap<BlockId, Block>,
 
-    dyn_target_cache: HashMap<(Option<DynTarget>, BlockId), Result<Set1<DynTarget>, Cyclic>>,
+    dyn_target_cache: HashMap<(Option<DynTarget>, BlockId), Result<Set1<DynTarget>, Partial>>,
 }
 
 impl<'a, P: Platform> Explorer<'a, P> {
@@ -202,27 +202,27 @@ impl<'a, P: Platform> Explorer<'a, P> {
         &mut self,
         replacement: Option<DynTarget>,
         bb: BlockId,
-    ) -> (Set1<DynTarget>, Option<Cyclic>) {
+    ) -> (Set1<DynTarget>, Option<Partial>) {
         match self.dyn_target_cache.entry((replacement, bb)) {
             Entry::Occupied(entry) => {
                 let r = entry.get();
                 return (r.unwrap_or(Set1::Empty), r.err());
             }
             Entry::Vacant(entry) => {
-                entry.insert(Err(Cyclic));
+                entry.insert(Err(Partial));
             }
         }
 
         let effect = self.get_or_lift_block(bb).effect;
         let mut dyn_targets_of_target = |target: Use<Val>| {
             if let Some(target_bb) = self.cx[target].as_const().map(BlockId::from) {
-                let (mut dyn_targets, cyclic) = self.bb_dyn_targets(replacement, target_bb);
+                let (mut dyn_targets, partial) = self.bb_dyn_targets(replacement, target_bb);
 
                 if let Set1::One(target) = &mut dyn_targets {
                     target.val = target.val.subst(self.cx, &self.blocks[&bb].state.end);
                 }
 
-                (dyn_targets, cyclic)
+                (dyn_targets, partial)
             } else {
                 let target = match replacement {
                     Some(DynTarget { val, depth: 0 }) => {
@@ -239,11 +239,11 @@ impl<'a, P: Platform> Explorer<'a, P> {
                 )
             }
         };
-        let (mut dyn_targets, mut cyclic) = match effect {
+        let (mut dyn_targets, mut partial) = match effect {
             Effect::Jump(target) => dyn_targets_of_target(target),
             Effect::Branch { t, e, .. } => {
-                let (mut t_dyn_targets, t_cyclic) = dyn_targets_of_target(t);
-                let (mut e_dyn_targets, e_cyclic) = dyn_targets_of_target(e);
+                let (mut t_dyn_targets, t_partial) = dyn_targets_of_target(t);
+                let (mut e_dyn_targets, e_partial) = dyn_targets_of_target(e);
                 if let (Set1::One(t), Set1::One(e)) = (&mut t_dyn_targets, &mut e_dyn_targets) {
                     if t.val == e.val && t.depth != e.depth {
                         let depth = t.depth.max(e.depth);
@@ -263,7 +263,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
                         );
                     }
                 }
-                (t_dyn_targets.union(e_dyn_targets), t_cyclic.or(e_cyclic))
+                (t_dyn_targets.union(e_dyn_targets), t_partial.or(e_partial))
             }
             Effect::PlatformCall { ret_pc, .. } => {
                 self.bb_dyn_targets(replacement, BlockId::from(ret_pc))
@@ -290,20 +290,20 @@ impl<'a, P: Platform> Explorer<'a, P> {
                         .checked_sub(target.depth + 1)
                         .map(|depth| DynTarget { val, depth })
                 });
-                let (target_target, target_cyclic) =
+                let (target_target, target_partial) =
                     self.bb_dyn_targets(target_replacement, target_bb);
-                cyclic = cyclic.or(target_cyclic);
+                partial = partial.or(target_partial);
                 dyn_targets = target_target.flat_map(|target_target| {
                     // Recompute the current BB, replacing the target with
                     // the target BB's target, to get the final target.
-                    let (final_target, final_cyclic) = self.bb_dyn_targets(
+                    let (final_target, final_partial) = self.bb_dyn_targets(
                         Some(DynTarget {
                             val: target_target.val,
                             depth: target.depth,
                         }),
                         bb,
                     );
-                    cyclic = cyclic.or(final_cyclic);
+                    partial = partial.or(final_partial);
                     final_target.flat_map(|final_target| {
                         assert_eq!(target.depth, final_target.depth);
                         Set1::One(DynTarget {
@@ -315,17 +315,17 @@ impl<'a, P: Platform> Explorer<'a, P> {
             }
         }
 
-        // Cycles are irrelevant if we're already dealing with more than one value.
+        // Cycles are irrelevant if we're already fully general.
         if let Set1::Many = dyn_targets {
-            cyclic = None;
+            partial = None;
         }
 
-        // Only cache results not tainted by cycles.
-        if cyclic.is_none() {
+        // Only cache final results.
+        if partial.is_none() {
             self.dyn_target_cache
                 .insert((replacement, bb), Ok(dyn_targets));
         }
 
-        (dyn_targets, cyclic)
+        (dyn_targets, partial)
     }
 }
