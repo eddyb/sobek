@@ -29,6 +29,13 @@ impl<T: Eq> Set1<T> {
         }
         self
     }
+
+    fn flat_map(self, f: impl FnOnce(T) -> Self) -> Self {
+        match self {
+            Set1::Empty | Set1::Many => self,
+            Set1::One(x) => f(x),
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -265,7 +272,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
         };
 
         // Propagate the value backwards through this BB.
-        if let Set1::One(target) = &mut dyn_targets {
+        if let Set1::One(target) = dyn_targets {
             let const_target = match target.val {
                 ReducedVal::Simple(val) => self.cx[val].as_const(),
                 _ => None,
@@ -283,29 +290,28 @@ impl<'a, P: Platform> Explorer<'a, P> {
                         .checked_sub(target.depth + 1)
                         .map(|depth| DynTarget { val, depth })
                 });
-                match self.bb_dyn_targets(target_replacement, target_bb) {
-                    (Set1::One(target_target), target_cyclic) => {
-                        cyclic = cyclic.or(target_cyclic);
-                        target.val = target_target.val;
-
-                        // Recompute the current BB, replacing the target with
-                        // the target BB's target, to get the final target.
-                        match self.bb_dyn_targets(Some(*target), bb) {
-                            (Set1::One(final_target), final_cyclic) => {
-                                cyclic = cyclic.or(final_cyclic);
-                                target.val = final_target.val;
-                                assert_eq!(target.depth, final_target.depth);
-                                target.depth += target_target.depth + 1;
-                            }
-                            _ => {
-                                dyn_targets = Set1::Empty;
-                            }
-                        }
-                    }
-                    _ => {
-                        dyn_targets = Set1::Empty;
-                    }
-                }
+                let (target_target, target_cyclic) =
+                    self.bb_dyn_targets(target_replacement, target_bb);
+                cyclic = cyclic.or(target_cyclic);
+                dyn_targets = target_target.flat_map(|target_target| {
+                    // Recompute the current BB, replacing the target with
+                    // the target BB's target, to get the final target.
+                    let (final_target, final_cyclic) = self.bb_dyn_targets(
+                        Some(DynTarget {
+                            val: target_target.val,
+                            depth: target.depth,
+                        }),
+                        bb,
+                    );
+                    cyclic = cyclic.or(final_cyclic);
+                    final_target.flat_map(|final_target| {
+                        assert_eq!(target.depth, final_target.depth);
+                        Set1::One(DynTarget {
+                            val: final_target.val,
+                            depth: target.depth + target_target.depth + 1,
+                        })
+                    })
+                });
             }
         }
 
