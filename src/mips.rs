@@ -260,6 +260,11 @@ impl Arch for Mips32 {
                 41 => state.mem = mem!(Store(mem_ref!(M16), val!(Trunc(B16, rt)))),
                 43 => state.mem = mem!(Store(mem_ref!(M32), rt)),
 
+                // FIXME(eddyb) figure out if these are the correct semantics for the
+                // LD/SD (Load/Store Doubleword) instructions in 32-bit mode on MIPS64.
+                55 => state.set(rd, val!(Trunc(B32, val!(Load(mem_ref!(M64)))))),
+                63 => state.mem = mem!(Store(mem_ref!(M64), val!(Zext(B64, rt)))),
+
                 _ => eprintln!("mips: op={} unknown", op),
             }
         }
