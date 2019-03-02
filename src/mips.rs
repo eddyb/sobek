@@ -113,6 +113,13 @@ impl Arch for Mips32 {
                 return Some(Effect::Jump(target));
             }};
         }
+        macro_rules! branch_target {
+            () => {
+                cx.a(IntOp::Add
+                    .eval(*pc, Const::new(B32, (imm.as_u32() << 2) as u64))
+                    .unwrap())
+            };
+        }
         macro_rules! branch {
             ($cond:expr => $b:expr, $t:expr, $e:expr) => {{
                 let (cond, t, e) = ($cond, $t, $e);
@@ -129,10 +136,7 @@ impl Arch for Mips32 {
                 return Some(Effect::Branch { cond, t, e });
             }};
             ($cond:expr => $b:expr) => {
-                branch!($cond => $b,
-                    cx.a(add4(*pc)),
-                    cx.a(IntOp::Add.eval(*pc, Const::new(B32, (imm.as_u32() << 2) as u64)).unwrap())
-                )
+                branch!($cond => $b, cx.a(add4(*pc)), branch_target!())
             };
         }
 
@@ -199,6 +203,11 @@ impl Arch for Mips32 {
                 B32,
                 ((pc.as_u32() & 0xc000_0000) | (field(0, 26) << 2)) as u64
             )))
+        } else if (op, rs, rt) == (4, 0, 0) {
+            // Special-case `zero == zero` branches to jumps.
+            // HACK(eddyb) this is done here to avoid const-folding
+            // away control-flow in the general case.
+            jump!(branch_target!());
         } else {
             // I format.
             let rd = rt;
