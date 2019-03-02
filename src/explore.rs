@@ -305,6 +305,23 @@ impl<'a, P: Platform> Explorer<'a, P> {
                     if let Set1::One(Some(final_target_bb)) =
                         targets.map(|target| target.as_const(self.cx).map(BlockId::from))
                     {
+                        // HACK(eddyb) detect trivial fixpoints/cycles.
+                        // TODO(eddyb) actually implement proper cycle-aware
+                        // support for consecutive "trampolining" exits.
+                        if target_bb == final_target_bb {
+                            let arg_values_is_const = match arg_values {
+                                Set1::Empty | Set1::Many => true,
+                                Set1::One(value) => value.as_const(self.cx).is_some(),
+                            };
+                            if arg_values_is_const {
+                                return Exit {
+                                    targets: Set1::Empty,
+                                    arg_values,
+                                    partial,
+                                };
+                            }
+                        }
+
                         panic!(
                             "explore: {:?} -> {:?} reaches {:?}/{} and then also {:?}/{}",
                             bb,
