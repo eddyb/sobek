@@ -446,15 +446,12 @@ impl IntOp {
 pub struct Reg {
     pub index: usize,
     pub size: BitSize,
-    pub name: Option<&'static str>,
+    pub name: &'static str,
 }
 
 impl fmt::Debug for Reg {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self.name {
-            Some(name) => write!(f, "{}", name),
-            None => write!(f, "r{}", self.index),
-        }
+        write!(f, "{}", self.name)
     }
 }
 
@@ -1092,11 +1089,7 @@ impl<P> Cx<P> {
                 // Ideally this would be provided by the `Arch`.
                 let r = match self[default] {
                     Val::InReg(r) if i == r.index => r,
-                    default => Reg {
-                        index: i,
-                        size: default.size(),
-                        name: None,
-                    },
+                    default => panic!("register #{} has non-register default {:?}", i, default),
                 };
                 collector
                     .data

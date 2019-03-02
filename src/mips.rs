@@ -40,6 +40,22 @@ impl State {
     }
 }
 
+#[rustfmt::skip]
+const REG_NAMES: [&str; 32] = [
+    "zero",
+    "at",
+    "rv0", "rv1",
+    "a0", "a1", "a2", "a3",
+    "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7",
+    "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
+    "t8", "t9",
+    "k0", "k1",
+    "gp",
+    "sp",
+    "fp",
+    "ra",
+];
+
 impl Arch for Mips32 {
     const ADDR_SIZE: BitSize = B32;
 
@@ -49,14 +65,14 @@ impl Arch for Mips32 {
                 Val::InReg(Reg {
                     index: i,
                     size: B32,
-                    name: None,
+                    name: REG_NAMES[i],
                 })
             }))
             .chain(["lo", "hi"].iter().enumerate().map(|(i, name)| {
                 Val::InReg(Reg {
                     index: 32 + i,
                     size: B32,
-                    name: Some(name),
+                    name,
                 })
             }))
             .map(|v| cx.a(v))
