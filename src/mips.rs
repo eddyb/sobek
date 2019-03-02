@@ -7,6 +7,31 @@ use std::iter;
 
 pub struct Mips32;
 
+pub enum Mode {
+    Kernel,
+    Supervisor,
+    User,
+}
+
+pub enum AddrSpace {
+    Direct { cached: bool },
+    Mapped(Mode),
+}
+
+impl Mips32 {
+    pub fn decode_addr(addr: u32) -> (AddrSpace, u32) {
+        let addr_space = match addr {
+            0x0000_0000..=0x7fff_ffff => return (AddrSpace::Mapped(Mode::User), addr),
+
+            0x8000_0000..=0x9fff_ffff => AddrSpace::Direct { cached: true },
+            0xa000_0000..=0xbfff_ffff => AddrSpace::Direct { cached: false },
+            0xc000_0000..=0xdfff_ffff => AddrSpace::Mapped(Mode::Supervisor),
+            0xe000_0000..=0xffff_ffff => AddrSpace::Mapped(Mode::Kernel),
+        };
+        (addr_space, addr & 0x1fff_ffff)
+    }
+}
+
 impl State {
     fn set(&mut self, r: usize, v: Use<Val>) {
         if r != 0 {

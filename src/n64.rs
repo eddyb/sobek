@@ -1,6 +1,6 @@
 use crate::explore::BlockId;
 use crate::ir::{BitSize, Const, Cx, MemSize, Platform, Rom, UnsupportedAddress};
-use crate::mips::Mips32;
+use crate::mips::{AddrSpace, Mips32};
 
 pub struct Cartridge {
     pub big_endian: bool,
@@ -8,19 +8,10 @@ pub struct Cartridge {
 }
 
 impl Cartridge {
-    fn virtual_to_physical(&self, mut addr: u32) -> u32 {
-        match addr {
-            0x8000_0000..=0x9fff_ffff => addr -= 0x8000_0000,
-            0xa000_0000..=0xbfff_ffff => addr -= 0xa000_0000,
-            _ => {}
-        }
-        addr
-    }
-
-    fn load_physical(&self, addr: u32, size: MemSize) -> Result<Const, UnsupportedAddress> {
+    fn load_physical(&self, addr: u32, size: MemSize) -> Result<Const, ()> {
         match addr {
             0x0000_0400..=0x003f_ffff => Ok(self.load_raw(0x1000 + (addr - 0x400), size)),
-            _ => return Err(UnsupportedAddress(Const::new(BitSize::B32, addr as u64))),
+            _ => Err(()),
         }
     }
 
@@ -75,7 +66,12 @@ impl Cartridge {
 
 impl Rom for Cartridge {
     fn load(&self, addr: Const, size: MemSize) -> Result<Const, UnsupportedAddress> {
-        self.load_physical(self.virtual_to_physical(addr.as_u32()), size)
+        let err = UnsupportedAddress(addr);
+        let (addr_space, addr) = Mips32::decode_addr(addr.as_u32());
+        match addr_space {
+            AddrSpace::Direct { .. } => self.load_physical(addr, size).map_err(|_| err),
+            AddrSpace::Mapped(_) => Err(err),
+        }
     }
 }
 
