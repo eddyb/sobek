@@ -986,6 +986,17 @@ impl<P> Cx<P> {
             data: &'a Data,
             fmt: &'a mut F,
             seen: PerKind<HashSet<Use<Val>>, HashSet<Use<Mem>>>,
+            empty: bool,
+        }
+
+        impl<P, F: fmt::Write> Printer<'_, P, F> {
+            fn start_def(&mut self) {
+                if self.empty {
+                    self.empty = false;
+                    let _ = writeln!(self.fmt, "{{");
+                }
+                let _ = write!(self.fmt, "    ");
+            }
         }
 
         impl<P, F: fmt::Write> Visitor for Printer<'_, P, F> {
@@ -1005,7 +1016,7 @@ impl<P> Cx<P> {
                 macro_rules! write_name {
                     ($fmt_str:literal $($rest:tt)*) => {{
                         if names == 0 {
-                            let _ = write!(self.fmt, "    ");
+                            self.start_def();
                         }
                         let _ = write!(self.fmt, concat!($fmt_str, " = ") $($rest)*);
                         names += 1;
@@ -1036,7 +1047,7 @@ impl<P> Cx<P> {
                 macro_rules! write_name {
                     ($fmt_str:literal $($rest:tt)*) => {{
                         if names == 0 {
-                            let _ = write!(self.fmt, "    ");
+                            self.start_def();
                         }
                         let _ = write!(self.fmt, concat!($fmt_str, " = ") $($rest)*);
                         names += 1;
@@ -1112,7 +1123,6 @@ impl<P> Cx<P> {
             T: Visit + fmt::Debug,
         {
             fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                writeln!(f, "{{")?;
                 DBG_LOCALS.set(&self.data.locals, || {
                     // FIXME(eddyb) proper error-handling.
                     let mut printer = Printer {
@@ -1120,15 +1130,20 @@ impl<P> Cx<P> {
                         data: &self.data,
                         fmt: f,
                         seen: Default::default(),
+                        empty: true,
                     };
                     if let Some(state) = self.state {
                         state.visit(&mut printer);
                     }
                     self.principal.visit(&mut printer);
 
-                    writeln!(f, "    {:?}", self.principal)
-                })?;
-                write!(f, "}}")
+                    if printer.empty {
+                        write!(f, "{:?}", self.principal)
+                    } else {
+                        writeln!(f, "    {:?}", self.principal)?;
+                        write!(f, "}}")
+                    }
+                })
             }
         }
 
