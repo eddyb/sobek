@@ -12,6 +12,15 @@ enum Set1<T> {
     Many,
 }
 
+impl<T: Visit> Visit for Set1<T> {
+    fn walk(&self, visitor: &mut impl Visitor) {
+        match self {
+            Set1::Empty | Set1::Many => {}
+            Set1::One(x) => x.visit(visitor),
+        }
+    }
+}
+
 impl<T: Eq> Set1<T> {
     fn insert(&mut self, value: T) {
         match *self {
@@ -33,16 +42,16 @@ impl<T: Eq> Set1<T> {
     fn map<U>(self, f: impl FnOnce(T) -> U) -> Set1<U> {
         match self {
             Set1::Empty => Set1::Empty,
-            Set1::Many => Set1::Many,
             Set1::One(x) => Set1::One(f(x)),
+            Set1::Many => Set1::Many,
         }
     }
 
     fn flat_map<U>(self, f: impl FnOnce(T) -> Set1<U>) -> Set1<U> {
         match self {
             Set1::Empty => Set1::Empty,
-            Set1::Many => Set1::Many,
             Set1::One(x) => f(x),
+            Set1::Many => Set1::Many,
         }
     }
 }
@@ -112,6 +121,13 @@ impl ReducedVal {
         }
 
         self
+    }
+
+    fn as_const<P>(&self, cx: &mut Cx<P>) -> Option<Const> {
+        match *self {
+            ReducedVal::Simple(val) => cx[val].as_const(),
+            _ => None,
+        }
     }
 }
 
@@ -226,15 +242,89 @@ impl<'a, P: Platform> Explorer<'a, P> {
         });
     }
 
-    fn find_exit_uncached_from_effect(&mut self, bb: BlockId, options: ExitOptions) -> Exit {
+    fn find_exit_uncached(&mut self, bb: BlockId, options: ExitOptions) -> Exit {
         let effect = self.get_or_lift_block(bb).effect;
-        let mut exit_from_target = |target: Use<Val>| {
-            if let Some(target_bb) = self.cx[target].as_const().map(BlockId::from) {
-                self.find_exit(target_bb, options)
-                    .subst(self.cx, &self.blocks[&bb].state.end)
+        let mut exit_from_target = |direct_target: Use<Val>| {
+            if let Some(direct_target_bb) = self.cx[direct_target].as_const().map(BlockId::from) {
+                let Exit {
+                    mut targets,
+                    mut arg_values,
+                    mut partial,
+                } = self
+                    .find_exit(direct_target_bb, options)
+                    .subst(self.cx, &self.blocks[&bb].state.end);
+
+                if let Set1::One(Some(target_bb)) =
+                    targets.map(|target| target.as_const(self.cx).map(BlockId::from))
+                {
+                    // FIXME(eddyb) abstract this better wrt `Exit` / `partial`.
+
+                    // Recurse on the indirect target.
+                    let target_exit = self.find_exit(target_bb, options);
+                    partial = partial.or(target_exit.partial);
+
+                    if let Set1::One(target_target) = target_exit.targets {
+                        if target_target.as_const(self.cx).is_some() {
+                            panic!(
+                                "explore: {:?} -> {:?} reached unexpected constant {}/{}",
+                                bb,
+                                direct_target_bb,
+                                self.cx.pretty_print(&target_exit.targets, None),
+                                self.cx.pretty_print(&target_exit.arg_values, None)
+                            );
+                        }
+                    }
+
+                    let mut resolve_values = |values: Set1<ReducedVal>| {
+                        values.flat_map(|value| {
+                            // Constants don't need any propagation work.
+                            if value.as_const(self.cx).is_some() {
+                                return Set1::One(value);
+                            }
+
+                            // Reuse the already computed `arg_values` where possible.
+                            if Some(value) == options.arg_value {
+                                return arg_values;
+                            }
+
+                            let exit = self
+                                .find_exit(
+                                    direct_target_bb,
+                                    ExitOptions {
+                                        arg_value: Some(value),
+                                    },
+                                )
+                                .subst(self.cx, &self.blocks[&bb].state.end);
+                            partial = partial.take().or(exit.partial);
+                            exit.arg_values
+                        })
+                    };
+                    targets = resolve_values(target_exit.targets);
+                    arg_values = resolve_values(target_exit.arg_values);
+
+                    if let Set1::One(Some(final_target_bb)) =
+                        targets.map(|target| target.as_const(self.cx).map(BlockId::from))
+                    {
+                        panic!(
+                            "explore: {:?} -> {:?} reaches {:?}/{} and then also {:?}/{}",
+                            bb,
+                            direct_target_bb,
+                            target_bb,
+                            self.cx.pretty_print(&target_exit.arg_values, None),
+                            final_target_bb,
+                            self.cx.pretty_print(&arg_values, None)
+                        );
+                    }
+                }
+
+                Exit {
+                    targets,
+                    arg_values,
+                    partial,
+                }
             } else {
                 Exit {
-                    targets: Set1::One(ReducedVal::Simple(target)),
+                    targets: Set1::One(ReducedVal::Simple(direct_target)),
                     arg_values: options.arg_value.map_or(Set1::Empty, |arg_value| {
                         Set1::One(arg_value.subst(self.cx, &self.blocks[&bb].state.end))
                     }),
@@ -245,6 +335,8 @@ impl<'a, P: Platform> Explorer<'a, P> {
         match effect {
             Effect::Jump(target) => exit_from_target(target),
             Effect::Branch { t, e, .. } => {
+                // TODO(eddyb) avoid duplicating work between `t` and `e`
+                // in `exit_from_target` when they converge early.
                 let t_exit = exit_from_target(t);
                 let e_exit = exit_from_target(e);
                 if let (Set1::One(t), Set1::One(e)) = (t_exit.targets, e_exit.targets) {
@@ -265,58 +357,6 @@ impl<'a, P: Platform> Explorer<'a, P> {
                 arg_values: Set1::Empty,
                 partial: None,
             },
-        }
-    }
-
-    fn find_exit_uncached(&mut self, bb: BlockId, options: ExitOptions) -> Exit {
-        let Exit {
-            mut targets,
-            mut arg_values,
-            mut partial,
-        } = self.find_exit_uncached_from_effect(bb, options);
-
-        if let Set1::One(target) = targets {
-            let const_target = match target {
-                ReducedVal::Simple(val) => self.cx[val].as_const(),
-                _ => None,
-            };
-            if let Some(target_bb) = const_target.map(BlockId::from) {
-                // FIXME(eddyb) abstract this better wrt `Exit` / `partial`.
-
-                // Recurse on the indirect target.
-                let target_exit = self.find_exit(target_bb, options);
-                partial = partial.or(target_exit.partial);
-                let mut resolve_values = |values: Set1<ReducedVal>| {
-                    values.flat_map(|value| {
-                        // Reuse the already computed `arg_values` where possible.
-                        if Some(value) == options.arg_value {
-                            return arg_values;
-                        }
-
-                        let exit = self.find_exit_uncached_from_effect(
-                            bb,
-                            ExitOptions {
-                                arg_value: Some(value),
-                            },
-                        );
-                        partial = partial.take().or(exit.partial);
-                        exit.arg_values
-                    })
-                };
-                targets = resolve_values(target_exit.targets);
-                arg_values = resolve_values(target_exit.arg_values);
-            }
-        }
-
-        // Cycles are irrelevant if we're already fully general.
-        if let Set1::Many = targets {
-            partial = None;
-        }
-
-        Exit {
-            targets,
-            arg_values,
-            partial,
         }
     }
 
@@ -348,7 +388,12 @@ impl<'a, P: Platform> Explorer<'a, P> {
         // It *might* be the case that not caching a partial value
         // (i.e. the `entry.remove()` call) has a similar effect?
         loop {
-            let exit = self.find_exit_uncached(bb, options);
+            let mut exit = self.find_exit_uncached(bb, options);
+
+            // Cycles are irrelevant if we're already fully general.
+            if let Set1::Many = exit.targets {
+                exit.partial = None;
+            }
 
             let mut entry = match self.exit_cache.entry((bb, options)) {
                 Entry::Occupied(entry) => entry,
