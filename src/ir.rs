@@ -269,7 +269,12 @@ impl From<bool> for Const {
 
 impl Const {
     pub fn new(size: BitSize, bits: u64) -> Self {
-        assert_eq!(bits, bits & size.mask());
+        assert!(
+            bits == (bits & size.mask()),
+            "Const::new({:?}, 0x{:x}): value does not fit",
+            size,
+            bits
+        );
 
         Const { size, bits }
     }
