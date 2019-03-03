@@ -772,18 +772,6 @@ impl Mem {
 
         Ok(self)
     }
-
-    pub fn guess_load<P>(&self, cx: &Cx<P>, addr: Use<Val>, size: MemSize) -> Option<Use<Val>> {
-        if let Mem::Store(r, v) = *self {
-            if r.addr == addr && r.size == size {
-                Some(v)
-            } else {
-                cx[r.mem].guess_load(cx, addr, size)
-            }
-        } else {
-            None
-        }
-    }
 }
 
 impl Visit for Use<Mem> {

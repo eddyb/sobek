@@ -1,5 +1,6 @@
 use crate::ir::{
-    Arch, BitSize, Block, Const, Cx, Effect, MemSize, Platform, State, Use, Val, Visit, Visitor,
+    Arch, BitSize, Block, Const, Cx, Effect, Mem, MemRef, MemSize, Platform, State, Use, Val,
+    Visit, Visitor,
 };
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
@@ -75,59 +76,56 @@ impl From<Const> for BlockId {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-enum ReducedVal {
-    Simple(Use<Val>),
-    Load { addr: Use<Val>, size: MemSize },
-}
-
-impl Visit for ReducedVal {
-    fn walk(&self, visitor: &mut impl Visitor) {
-        match *self {
-            ReducedVal::Simple(val) => visitor.visit_val_use(val),
-            ReducedVal::Load { addr, .. } => visitor.visit_val_use(addr),
-        }
-    }
-}
-
-impl ReducedVal {
-    fn subst<P>(mut self, cx: &mut Cx<P>, base: &State) -> Self {
-        self = match self {
-            ReducedVal::Simple(val) => ReducedVal::Simple(val.subst(cx, base)),
-            ReducedVal::Load { addr, size } => ReducedVal::Load {
-                addr: addr.subst(cx, base),
-                size,
+impl Use<Mem> {
+    // HACK(eddyb) try to get the last stored value.
+    fn subst_reduce_load<P>(
+        self,
+        cx: &mut Cx<P>,
+        base: Option<&State>,
+        addr: Use<Val>,
+        size: MemSize,
+    ) -> Use<Val> {
+        match cx[self] {
+            Mem::In => match base {
+                Some(base) => base.mem.subst_reduce_load(cx, None, addr, size),
+                None => cx.a(Val::Load(MemRef {
+                    mem: self,
+                    addr,
+                    size,
+                })),
             },
-        };
 
-        // HACK(eddyb) try to get the last stored value.
-        loop {
-            let (mem, addr, size) = match self {
-                ReducedVal::Simple(val) => match cx[val] {
-                    Val::Load(r) => (r.mem, r.addr, r.size),
-                    _ => break,
-                },
-                ReducedVal::Load { addr, size } => (base.mem, addr, size),
-            };
-            match cx[mem].guess_load(cx, addr, size) {
-                Some(v) => self = ReducedVal::Simple(v),
-                None => {
-                    // Replace `ReducedVal::Simple(Load(_))` with
-                    // `ReducedVal::Load`, to ignore the base memory.
-                    self = ReducedVal::Load { addr, size };
-                    break;
+            Mem::Store(r, v) => {
+                if r.addr.subst_reduce(cx, base) == addr && r.size == size {
+                    v.subst_reduce(cx, base)
+                } else {
+                    r.mem.subst_reduce_load(cx, base, addr, size)
                 }
             }
         }
-
-        self
     }
+}
 
-    fn as_const<P>(&self, cx: &mut Cx<P>) -> Option<Const> {
-        match *self {
-            ReducedVal::Simple(val) => cx[val].as_const(),
-            _ => None,
-        }
+// FIXME(eddyb) introduce a more general "folder" abstraction.
+impl Use<Val> {
+    fn subst_reduce<P>(self, cx: &mut Cx<P>, base: Option<&State>) -> Self {
+        let v = match cx[self] {
+            Val::InReg(r) => return base.map_or(self, |base| base.regs[r.index]),
+
+            Val::Const(_) => return self,
+
+            Val::Int(op, size, a, b) => {
+                Val::Int(op, size, a.subst_reduce(cx, base), b.subst_reduce(cx, base))
+            }
+            Val::Trunc(size, x) => Val::Trunc(size, x.subst_reduce(cx, base)),
+            Val::Sext(size, x) => Val::Sext(size, x.subst_reduce(cx, base)),
+            Val::Zext(size, x) => Val::Zext(size, x.subst_reduce(cx, base)),
+            Val::Load(r) => {
+                let addr = r.addr.subst_reduce(cx, base);
+                return r.mem.subst_reduce_load(cx, base, addr, r.size);
+            }
+        };
+        cx.a(v)
     }
 }
 
@@ -137,7 +135,7 @@ struct ExitOptions {
     /// Argument value for the exit "continuation".
     /// If present, will be back-propagated from
     /// all the jumps to the exit "continuation".
-    arg_value: Option<ReducedVal>,
+    arg_value: Option<Use<Val>>,
 }
 
 struct Partial {
@@ -152,12 +150,12 @@ struct Exit {
     /// Set of non-constant jump destination values.
     /// An empty set indicates the (sub-)CFG diverges, by
     /// eventually reaching infinite loops and/or traps.
-    targets: Set1<ReducedVal>,
+    targets: Set1<Use<Val>>,
 
     /// Set of "continuation argument" values.
     /// Only empty if no argument was provided (see `ExitKey`).
     // TODO(eddyb) should this be per `targets` value?
-    arg_values: Set1<ReducedVal>,
+    arg_values: Set1<Use<Val>>,
 
     /// Indicates whether this (sub-)CFG contains unresolved
     /// cycles, which may have resulted in the computed exit
@@ -176,8 +174,12 @@ impl Exit {
 
     fn subst<P>(self, cx: &mut Cx<P>, base: &State) -> Self {
         Exit {
-            targets: self.targets.map(|target| target.subst(cx, base)),
-            arg_values: self.arg_values.map(|arg_value| arg_value.subst(cx, base)),
+            targets: self
+                .targets
+                .map(|target| target.subst_reduce(cx, Some(base))),
+            arg_values: self
+                .arg_values
+                .map(|arg_value| arg_value.subst_reduce(cx, Some(base))),
             partial: self.partial,
         }
     }
@@ -245,6 +247,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
     fn find_exit_uncached(&mut self, bb: BlockId, options: ExitOptions) -> Exit {
         let effect = self.get_or_lift_block(bb).effect;
         let mut exit_from_target = |direct_target: Use<Val>| {
+            let direct_target = direct_target.subst_reduce(self.cx, None);
             if let Some(direct_target_bb) = self.cx[direct_target].as_const().map(BlockId::from) {
                 let Exit {
                     mut targets,
@@ -255,7 +258,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
                     .subst(self.cx, &self.blocks[&bb].state.end);
 
                 if let Set1::One(Some(target_bb)) =
-                    targets.map(|target| target.as_const(self.cx).map(BlockId::from))
+                    targets.map(|target| self.cx[target].as_const().map(BlockId::from))
                 {
                     // FIXME(eddyb) abstract this better wrt `Exit` / `partial`.
 
@@ -264,7 +267,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
                     partial = partial.or(target_exit.partial);
 
                     if let Set1::One(target_target) = target_exit.targets {
-                        if target_target.as_const(self.cx).is_some() {
+                        if self.cx[target_target].as_const().is_some() {
                             panic!(
                                 "explore: {:?} -> {:?} reached unexpected constant {}/{}",
                                 bb,
@@ -275,10 +278,10 @@ impl<'a, P: Platform> Explorer<'a, P> {
                         }
                     }
 
-                    let mut resolve_values = |values: Set1<ReducedVal>| {
+                    let mut resolve_values = |values: Set1<Use<Val>>| {
                         values.flat_map(|value| {
                             // Constants don't need any propagation work.
-                            if value.as_const(self.cx).is_some() {
+                            if self.cx[value].as_const().is_some() {
                                 return Set1::One(value);
                             }
 
@@ -303,7 +306,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
                     arg_values = resolve_values(target_exit.arg_values);
 
                     if let Set1::One(Some(final_target_bb)) =
-                        targets.map(|target| target.as_const(self.cx).map(BlockId::from))
+                        targets.map(|target| self.cx[target].as_const().map(BlockId::from))
                     {
                         // HACK(eddyb) detect trivial fixpoints/cycles.
                         // TODO(eddyb) actually implement proper cycle-aware
@@ -311,7 +314,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
                         if target_bb == final_target_bb {
                             let arg_values_is_const = match arg_values {
                                 Set1::Empty | Set1::Many => true,
-                                Set1::One(value) => value.as_const(self.cx).is_some(),
+                                Set1::One(value) => self.cx[value].as_const().is_some(),
                             };
                             if arg_values_is_const {
                                 return Exit {
@@ -341,9 +344,11 @@ impl<'a, P: Platform> Explorer<'a, P> {
                 }
             } else {
                 Exit {
-                    targets: Set1::One(ReducedVal::Simple(direct_target)),
+                    targets: Set1::One(direct_target),
                     arg_values: options.arg_value.map_or(Set1::Empty, |arg_value| {
-                        Set1::One(arg_value.subst(self.cx, &self.blocks[&bb].state.end))
+                        Set1::One(
+                            arg_value.subst_reduce(self.cx, Some(&self.blocks[&bb].state.end)),
+                        )
                     }),
                     partial: None,
                 }
