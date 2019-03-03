@@ -553,6 +553,13 @@ impl Val {
         }
     }
 
+    pub fn int_sub<P>(a: Use<Val>, b: Use<Val>) -> impl AllocIn<Cx<P>, Kind = Self> {
+        move |cx: &mut Cx<P>| {
+            let size = cx[a].size();
+            Val::Int(IntOp::Add, size, a, cx.a(Val::int_neg(b)))
+        }
+    }
+
     pub fn bit_not<P>(v: Use<Val>) -> impl AllocIn<Cx<P>, Kind = Self> {
         move |cx: &mut Cx<P>| {
             let size = cx[v].size();

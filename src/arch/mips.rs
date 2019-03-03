@@ -185,7 +185,7 @@ impl Arch for Mips32 {
                 }
 
                 32 | 33 => val!(Int(IntOp::Add, B32, rs, rt)),
-                34 | 35 => val!(Int(IntOp::Add, B32, rs, val!(int_neg(rt)))),
+                34 | 35 => val!(int_sub(rs, rt)),
                 36 => val!(Int(IntOp::And, B32, rs, rt)),
                 37 => val!(Int(IntOp::Or, B32, rs, rt)),
                 38 => val!(Int(IntOp::Xor, B32, rs, rt)),
