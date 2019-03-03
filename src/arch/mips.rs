@@ -152,7 +152,7 @@ impl Arch for Mips32 {
                 return Some(Effect::Branch { cond, t, e });
             }};
             ($cond:expr => $b:expr) => {
-                branch!($cond => $b, cx.a(add4(*pc)), branch_target!())
+                branch!($cond => $b, branch_target!(), cx.a(add4(*pc)))
             };
         }
 
