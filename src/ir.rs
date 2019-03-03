@@ -243,7 +243,11 @@ impl fmt::Debug for Const {
         } else if c != 0 {
             write!(f, "0x{:04x}_{:04x}", c, d)
         } else if d > 9 {
-            write!(f, "0x{:04x}", d)
+            if self.size >= BitSize::B16 {
+                write!(f, "0x{:04x}", d)
+            } else {
+                write!(f, "0x{:02x}", d)
+            }
         } else {
             write!(f, "{}", d)
         }
