@@ -1,6 +1,6 @@
+use crate::arch::mips::{AddrSpace, Mips32};
 use crate::explore::BlockId;
 use crate::ir::{BitSize, Const, Cx, MemSize, Platform, Rom, UnsupportedAddress};
-use crate::mips::{AddrSpace, Mips32};
 
 pub struct Cartridge {
     pub big_endian: bool,
