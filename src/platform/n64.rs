@@ -1,6 +1,5 @@
 use crate::arch::mips::{AddrSpace, Mips32};
-use crate::explore::BlockId;
-use crate::ir::{BitSize, Const, Cx, MemSize, Platform, Rom, UnsupportedAddress};
+use crate::ir::{BitSize, Const, MemSize, Platform, Rom, UnsupportedAddress};
 
 pub struct Cartridge {
     pub big_endian: bool,
@@ -62,6 +61,10 @@ impl Cartridge {
             }
         }
     }
+
+    pub fn entry_pc(&self) -> Const {
+        self.load_raw(8, MemSize::M32)
+    }
 }
 
 impl Rom for Cartridge {
@@ -89,27 +92,5 @@ impl Platform for N64 {
     }
     fn rom(&self) -> &Self::Rom {
         &self.rom
-    }
-}
-
-pub fn analyze(rom: Cartridge) {
-    let mut cx = Cx::new(N64 { arch: Mips32, rom });
-    let mut explorer = crate::explore::Explorer::new(&mut cx);
-    let entry_pc = explorer.cx.platform.rom.load_raw(8, MemSize::M32);
-    explorer.explore_bbs(entry_pc);
-
-    let mut last_end = explorer.blocks.keys().next().unwrap().entry_pc;
-    for (&bb, block) in &explorer.blocks {
-        if last_end < bb.entry_pc {
-            println!("{:?} {{", BlockId { entry_pc: last_end });
-            println!("    /* {} unanalyzed bytes */", bb.entry_pc - last_end);
-            println!("}}");
-        }
-        println!(
-            "{:?} {}",
-            bb,
-            cx.pretty_print(&block.effect, Some(&block.state.end))
-        );
-        last_end = block.pc.end.as_u64();
     }
 }
