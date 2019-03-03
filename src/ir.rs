@@ -2,6 +2,7 @@ use scoped_tls::scoped_thread_local;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::marker::PhantomData;
+use std::ops::Deref;
 use std::ops::{Index, RangeTo};
 
 pub use self::store::*;
@@ -897,12 +898,87 @@ pub trait Rom {
     fn load(&self, addr: Const, size: MemSize) -> Result<Const, UnsupportedAddress>;
 }
 
+pub struct RawRom<T> {
+    pub big_endian: bool,
+    pub data: T,
+}
+
+impl<T: Deref<Target = [u8]>> Rom for RawRom<T> {
+    fn load(&self, addr: Const, size: MemSize) -> Result<Const, UnsupportedAddress> {
+        let addr = addr.as_u64();
+        let b = |i| self.data[addr as usize + i];
+
+        // FIXME(eddyb) deduplicate these if possible.
+        Ok(match size {
+            MemSize::M8 => Const::new(BitSize::B8, b(0) as u64),
+            MemSize::M16 => {
+                assert_eq!(addr & 1, 0);
+
+                let bytes = [b(0), b(1)];
+                Const::new(
+                    BitSize::B16,
+                    if self.big_endian {
+                        u16::from_be_bytes(bytes)
+                    } else {
+                        u16::from_le_bytes(bytes)
+                    } as u64,
+                )
+            }
+            MemSize::M32 => {
+                assert_eq!(addr & 3, 0);
+
+                let bytes = [b(0), b(1), b(2), b(3)];
+                Const::new(
+                    BitSize::B32,
+                    if self.big_endian {
+                        u32::from_be_bytes(bytes)
+                    } else {
+                        u32::from_le_bytes(bytes)
+                    } as u64,
+                )
+            }
+            MemSize::M64 => {
+                assert_eq!(addr & 7, 0);
+
+                let bytes = [b(0), b(1), b(2), b(3), b(4), b(5), b(6), b(7)];
+                Const::new(
+                    BitSize::B64,
+                    if self.big_endian {
+                        u64::from_be_bytes(bytes)
+                    } else {
+                        u64::from_le_bytes(bytes)
+                    },
+                )
+            }
+        })
+    }
+}
+
+// FIXME(eddyb) maybe this and friends (e.g. `Rom`) shouldn't be here.
+// but `Cx<P>` requires `P: Platform`, so some reorganization is needed.
 pub trait Platform {
     type Arch: Arch;
     type Rom: Rom;
 
     fn arch(&self) -> &Self::Arch;
     fn rom(&self) -> &Self::Rom;
+}
+
+pub struct SimplePlatform<A, R> {
+    pub arch: A,
+    pub rom: R,
+}
+
+impl<A: Arch, R: Rom> Platform for SimplePlatform<A, R> {
+    type Arch = A;
+    type Rom = R;
+
+    fn arch(&self) -> &Self::Arch {
+        &self.arch
+    }
+    fn rom(&self) -> &Self::Rom {
+        &self.rom
+    }
 }
 
 pub struct Cx<P> {

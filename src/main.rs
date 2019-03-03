@@ -1,6 +1,6 @@
 use sobek::arch::mips::Mips32;
 use sobek::explore::{BlockId, Explorer};
-use sobek::ir::{Const, Cx, Platform};
+use sobek::ir::{BitSize, Const, Cx, Platform, RawRom};
 use sobek::platform::n64::{self, N64};
 use std::iter;
 
@@ -35,8 +35,10 @@ fn main() {
     match &arch[..] {
         "n64" => {
             let rom = n64::Cartridge {
-                big_endian: true,
-                data,
+                raw: RawRom {
+                    big_endian: true,
+                    data,
+                },
             };
             let entry_pc = rom.entry_pc();
             analyze_and_dump(N64 { arch: Mips32, rom }, iter::once(entry_pc));
