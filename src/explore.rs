@@ -426,11 +426,31 @@ impl<'a, P: Platform> Explorer<'a, P> {
             let old_arg_values = mem::replace(&mut cached.arg_values, exit.arg_values);
             let old_observed = mem::replace(&mut cached.partial.as_mut().unwrap().observed, false);
 
-            // Keep retrying as long as a now-obsolete `targets` / `arg_values` was observed.
+            // Keep retrying as long as a now-obsolete `targets` / `arg_values` were observed.
             // TODO(eddyb) how should fixpoint be detected?
             // Can't assume that a certain `targets` set is final,
             // as there could be outer cycles blocking progress.
-            if old_observed && (old_targets != exit.targets || old_arg_values != exit.arg_values) {
+            let progress =
+                |cx: &mut Cx<P>, old: Set1<Use<Val>>, new: Set1<Use<Val>>| match (old, new) {
+                    (Set1::One(old), Set1::One(new)) => {
+                        if old != new {
+                            println!(
+                                "explore: {:?} changed a value from {} to {}",
+                                bb,
+                                cx.pretty_print(&old, None),
+                                cx.pretty_print(&new, None)
+                            )
+                        }
+                        false
+                    }
+                    (Set1::Empty, Set1::Empty) | (Set1::Many, Set1::Many) => false,
+                    (Set1::Empty, _) | (_, Set1::Many) => true,
+                    (_, Set1::Empty) | (Set1::Many, _) => unreachable!(),
+                };
+            // Always check for progress, to ensure the sanity checks run.
+            let progress = progress(self.cx, old_targets, exit.targets)
+                | progress(self.cx, old_arg_values, exit.arg_values);
+            if old_observed && progress {
                 continue;
             }
 
