@@ -1,4 +1,5 @@
 pub mod arch {
+    pub mod _8051;
     pub mod mips;
 }
 pub mod explore;

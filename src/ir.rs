@@ -207,7 +207,7 @@ pub enum BitSize {
 }
 
 impl BitSize {
-    fn bits(self) -> u8 {
+    pub fn bits(self) -> u8 {
         match self {
             BitSize::B1 => 1,
             BitSize::B8 => 8,
@@ -277,6 +277,22 @@ impl Const {
         );
 
         Const { size, bits }
+    }
+
+    pub fn as_i8(&self) -> i8 {
+        self.as_i64() as i8
+    }
+
+    pub fn as_u8(&self) -> u8 {
+        self.as_u64() as u8
+    }
+
+    pub fn as_i16(&self) -> i16 {
+        self.as_i64() as i16
+    }
+
+    pub fn as_u16(&self) -> u16 {
+        self.as_u64() as u16
     }
 
     pub fn as_i32(&self) -> i32 {
@@ -485,7 +501,7 @@ impl Into<BitSize> for MemSize {
 }
 
 impl MemSize {
-    fn bits(self) -> u8 {
+    pub fn bits(self) -> u8 {
         match self {
             MemSize::M8 => 8,
             MemSize::M16 => 16,
@@ -564,6 +580,34 @@ impl Val {
         move |cx: &mut Cx<P>| {
             let size = cx[v].size();
             Val::Int(IntOp::Xor, size, v, cx.a(Const::new(size, size.mask())))
+        }
+    }
+
+    pub fn bit_rol<P>(v: Use<Val>, n: Use<Val>) -> impl AllocIn<Cx<P>, Kind = Self> {
+        move |cx: &mut Cx<P>| {
+            let size = cx[v].size();
+            let bits = cx.a(Const::new(cx[n].size(), size.bits() as u64));
+            let bits_minus_n = cx.a(Val::int_sub(bits, n));
+            Val::Int(
+                IntOp::Or,
+                size,
+                cx.a(Val::Int(IntOp::Shl, size, v, n)),
+                cx.a(Val::Int(IntOp::ShrU, size, v, bits_minus_n)),
+            )
+        }
+    }
+
+    pub fn bit_ror<P>(v: Use<Val>, n: Use<Val>) -> impl AllocIn<Cx<P>, Kind = Self> {
+        move |cx: &mut Cx<P>| {
+            let size = cx[v].size();
+            let bits = cx.a(Const::new(cx[n].size(), size.bits() as u64));
+            let bits_minus_n = cx.a(Val::int_sub(bits, n));
+            Val::Int(
+                IntOp::Or,
+                size,
+                cx.a(Val::Int(IntOp::ShrU, size, v, n)),
+                cx.a(Val::Int(IntOp::Shl, size, v, bits_minus_n)),
+            )
         }
     }
 

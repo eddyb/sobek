@@ -1,6 +1,7 @@
 use sobek::arch::mips::Mips32;
+use sobek::arch::_8051::_8051;
 use sobek::explore::{BlockId, Explorer};
-use sobek::ir::{BitSize, Const, Cx, Platform, RawRom};
+use sobek::ir::{BitSize, Const, Cx, Platform, RawRom, SimplePlatform};
 use sobek::platform::n64::{self, N64};
 use std::iter;
 
@@ -33,6 +34,18 @@ fn main() {
     let path = std::env::args().nth(2).unwrap();
     let data = std::fs::read(path).unwrap();
     match &arch[..] {
+        "8051" => {
+            analyze_and_dump(
+                SimplePlatform {
+                    arch: _8051,
+                    rom: RawRom {
+                        big_endian: false,
+                        data,
+                    },
+                },
+                iter::once(Const::new(BitSize::B8, 0)),
+            );
+        }
         "n64" => {
             let rom = n64::Cartridge {
                 raw: RawRom {
