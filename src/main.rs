@@ -43,7 +43,7 @@ fn main() {
                         data,
                     },
                 },
-                iter::once(Const::new(BitSize::B8, 0)),
+                iter::once(Const::new(BitSize::B16, 0)),
             );
         }
         "n64" => {
