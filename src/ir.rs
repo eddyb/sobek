@@ -1342,13 +1342,19 @@ impl<P> Cx<P> {
         };
 
         {
+            let default = self.default.mem;
             let m = edge_states_and_values
                 .map(|(state, _), _| state.mem)
                 .merge(|t, e| {
-                    assert_eq!(t, e);
-                    t
+                    if t == e {
+                        t
+                    } else {
+                        use_counter.visit_mem_use(t);
+                        use_counter.visit_mem_use(e);
+                        default
+                    }
                 });
-            if m != self.default.mem {
+            if m != default {
                 use_counter.data.state_mem = Some(m);
                 use_counter.visit_mem_use(m);
             }
@@ -1358,8 +1364,13 @@ impl<P> Cx<P> {
             let v = edge_states_and_values
                 .map(|(state, _), _| state.regs[i])
                 .merge(|t, e| {
-                    assert_eq!(t, e);
-                    t
+                    if t == e {
+                        t
+                    } else {
+                        use_counter.visit_val_use(t);
+                        use_counter.visit_val_use(e);
+                        default
+                    }
                 });
             if v == default {
                 continue;
@@ -1411,14 +1422,63 @@ impl<P> Cx<P> {
                         empty: true,
                     };
                     self.edge_states_and_values.visit(&mut printer);
+                    let block_opened = !printer.empty;
 
-                    let edge_values = self.edge_states_and_values.map(|(_, value), _| value);
-                    if printer.empty {
-                        write!(f, "{:?}", edge_values)
-                    } else {
-                        writeln!(f, "    {:?}", edge_values)?;
-                        write!(f, "}}")
+                    match self.edge_states_and_values {
+                        Edges::One((_, value)) => {
+                            if block_opened {
+                                write!(f, "    ")?;
+                            }
+                            write!(f, "{:?}", value)?;
+                            if block_opened {
+                                write!(f, "\n}}")?;
+                            }
+                        }
+                        Edges::Branch { cond, t, e } => {
+                            // HACK(eddyb) always print if-else multi-line.
+                            if !block_opened {
+                                writeln!(f, "{{")?;
+                            }
+
+                            let print_edge =
+                                |f: &mut fmt::Formatter,
+                                 (state, value): (&State, _),
+                                 (other_state, _): (&State, _)| {
+                                    {
+                                        let default = self.cx.default.mem;
+                                        let m = state.mem;
+                                        if m != default && m != other_state.mem {
+                                            writeln!(f, "        m = {:?};", m)?;
+                                        }
+                                    }
+                                    for (i, &default) in self.cx.default.regs.iter().enumerate() {
+                                        let v = state.regs[i];
+                                        if v != default && v != other_state.regs[i] {
+                                            // HACK(eddyb) try to guess the register name.
+                                            // Ideally this would be provided by the `Arch`.
+                                            let r = match self.cx[default] {
+                                                Val::InReg(r) if i == r.index => r,
+                                                default => panic!(
+                                                    "register #{} has non-register default {:?}",
+                                                    i, default
+                                                ),
+                                            };
+                                            writeln!(f, "        {:?} = {:?};", r, v)?;
+                                        }
+                                    }
+                                    writeln!(f, "        {:?}", value)
+                                };
+
+                            writeln!(f, "    if {:?} {{", cond)?;
+                            print_edge(f, t, e)?;
+                            writeln!(f, "    }} else {{")?;
+                            print_edge(f, e, t)?;
+                            writeln!(f, "    }}")?;
+                            write!(f, "}}")?;
+                        }
                     }
+
+                    Ok(())
                 })
             }
         }
