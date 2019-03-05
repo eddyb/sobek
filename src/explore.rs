@@ -1,6 +1,6 @@
 use crate::ir::{
-    Arch, BitSize, Block, Const, Cx, Effect, Mem, MemRef, MemSize, Platform, State, Use, Val,
-    Visit, Visitor,
+    Arch, BitSize, Block, Const, Cx, Edge, Edges, Effect, Mem, MemRef, MemSize, Platform, State,
+    Use, Val, Visit, Visitor,
 };
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
@@ -207,26 +207,22 @@ impl<'a, P: Platform> Explorer<'a, P> {
         if !self.blocks.contains_key(&bb) {
             let mut state = self.cx.default.clone();
             let mut pc = Const::new(P::Arch::ADDR_SIZE, bb.entry_pc);
-            let effect = loop {
-                match P::Arch::lift_instr(self.cx, &mut pc, &mut state) {
-                    Some(effect) => break effect,
-                    None => {}
+            let edges = loop {
+                match P::Arch::lift_instr(self.cx, &mut pc, state) {
+                    Ok(new_state) => state = new_state,
+                    Err(edges) => break edges,
                 }
 
                 // Prevent blocks from overlapping where possible.
                 if self.blocks.contains_key(&BlockId::from(pc)) {
-                    break Effect::Jump(self.cx.a(pc));
+                    break Edges::One(Edge {
+                        state,
+                        effect: Effect::Jump(self.cx.a(pc)),
+                    });
                 }
             };
 
-            self.blocks.insert(
-                bb,
-                Block {
-                    pc: ..pc,
-                    state: ..state,
-                    effect,
-                },
-            );
+            self.blocks.insert(bb, Block { pc: ..pc, edges });
         }
         &self.blocks[&bb]
     }
@@ -245,8 +241,12 @@ impl<'a, P: Platform> Explorer<'a, P> {
     }
 
     fn find_exit_uncached(&mut self, bb: BlockId, options: ExitOptions) -> Exit {
-        let effect = self.get_or_lift_block(bb).effect;
-        let mut exit_from_target = |direct_target: Use<Val>| {
+        let edge_effects = self
+            .get_or_lift_block(bb)
+            .edges
+            .as_ref()
+            .map(|e, _| e.effect);
+        let mut exit_from_target = |direct_target: Use<Val>, br_cond: Option<bool>| {
             let direct_target = direct_target.subst_reduce(self.cx, None);
             if let Some(direct_target_bb) = self.cx[direct_target].as_const().map(BlockId::from) {
                 let Exit {
@@ -255,7 +255,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
                     mut partial,
                 } = self
                     .find_exit(direct_target_bb, options)
-                    .subst(self.cx, &self.blocks[&bb].state.end);
+                    .subst(self.cx, &self.blocks[&bb].edges.as_ref().get(br_cond).state);
 
                 if let Set1::One(Some(target_bb)) =
                     targets.map(|target| self.cx[target].as_const().map(BlockId::from))
@@ -297,7 +297,10 @@ impl<'a, P: Platform> Explorer<'a, P> {
                                         arg_value: Some(value),
                                     },
                                 )
-                                .subst(self.cx, &self.blocks[&bb].state.end);
+                                .subst(
+                                    self.cx,
+                                    &self.blocks[&bb].edges.as_ref().get(br_cond).state,
+                                );
                             partial = partial.take().or(exit.partial);
                             exit.arg_values
                         })
@@ -351,22 +354,30 @@ impl<'a, P: Platform> Explorer<'a, P> {
                 Exit {
                     targets: Set1::One(direct_target),
                     arg_values: options.arg_value.map_or(Set1::Empty, |arg_value| {
-                        Set1::One(
-                            arg_value.subst_reduce(self.cx, Some(&self.blocks[&bb].state.end)),
-                        )
+                        Set1::One(arg_value.subst_reduce(
+                            self.cx,
+                            Some(&self.blocks[&bb].edges.as_ref().get(br_cond).state),
+                        ))
                     }),
                     partial: None,
                 }
             }
         };
-        match effect {
-            Effect::Jump(target) => exit_from_target(target),
-            Effect::Branch { t, e, .. } => {
-                // TODO(eddyb) avoid duplicating work between `t` and `e`
-                // in `exit_from_target` when they converge early.
-                let t_exit = exit_from_target(t);
-                let e_exit = exit_from_target(e);
-                if let (Set1::One(t), Set1::One(e)) = (t_exit.targets, e_exit.targets) {
+        // TODO(eddyb) avoid duplicating work between the `t` and `e`
+        // of a branch in `exit_from_target`, when they converge early.
+        edge_effects
+            .map(|effect, br_cond| match effect {
+                Effect::Jump(target) | Effect::PlatformCall { ret_pc: target, .. } => {
+                    exit_from_target(target, br_cond)
+                }
+                Effect::Trap { .. } => Exit {
+                    targets: Set1::Empty,
+                    arg_values: Set1::Empty,
+                    partial: None,
+                },
+            })
+            .merge(|t, e| {
+                if let (Set1::One(t), Set1::One(e)) = (t.targets, e.targets) {
                     if t != e {
                         println!(
                             "explore: {:?}: ambiguous targets: {} vs {}",
@@ -376,15 +387,8 @@ impl<'a, P: Platform> Explorer<'a, P> {
                         );
                     }
                 }
-                t_exit.merge(e_exit)
-            }
-            Effect::PlatformCall { ret_pc, .. } => self.find_exit(BlockId::from(ret_pc), options),
-            Effect::Trap { .. } => Exit {
-                targets: Set1::Empty,
-                arg_values: Set1::Empty,
-                partial: None,
-            },
-        }
+                t.merge(e)
+            })
     }
 
     // FIXME(eddyb) reuse cached value when it doesn't interact with `options`.

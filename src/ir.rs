@@ -737,6 +737,15 @@ pub trait Visit {
     }
 }
 
+impl<T: Visit> Visit for &'_ T {
+    fn walk(&self, visitor: &mut impl Visitor) {
+        (**self).walk(visitor);
+    }
+    fn visit(&self, visitor: &mut impl Visitor) {
+        (**self).visit(visitor);
+    }
+}
+
 impl Visit for Use<Val> {
     fn walk(&self, visitor: &mut impl Visitor) {
         let val = visitor.cx()[*self];
@@ -858,26 +867,14 @@ impl Use<Mem> {
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Effect {
     Jump(Use<Val>),
-    Branch {
-        cond: Use<Val>,
-        t: Use<Val>,
-        e: Use<Val>,
-    },
-
-    PlatformCall {
-        code: u32,
-        ret_pc: Const,
-    },
-    Trap {
-        code: u32,
-    },
+    PlatformCall { code: u32, ret_pc: Use<Val> },
+    Trap { code: u32 },
 }
 
 impl fmt::Debug for Effect {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Effect::Jump(target) => write!(f, "-> {:?}", target),
-            Effect::Branch { cond, t, e } => write!(f, "-> {:?} ? {:?} : {:?}", cond, t, e),
+            Effect::Jump(target) => write!(f, "{:?}", target),
             Effect::PlatformCall { code, ret_pc } => {
                 write!(f, "PlatformCall({}) -> {:?}", code, ret_pc)
             }
@@ -891,11 +888,6 @@ impl Visit for Effect {
         match *self {
             Effect::Jump(target) => {
                 visitor.visit_val_use(target);
-            }
-            Effect::Branch { cond, t, e } => {
-                visitor.visit_val_use(cond);
-                visitor.visit_val_use(t);
-                visitor.visit_val_use(e);
             }
             Effect::PlatformCall { .. } | Effect::Trap { .. } => {}
         }
@@ -921,10 +913,85 @@ impl Visit for State {
     }
 }
 
+pub struct Edge {
+    pub state: State,
+    pub effect: Effect,
+}
+
+impl Visit for Edge {
+    fn walk(&self, visitor: &mut impl Visitor) {
+        self.state.visit(visitor);
+        self.effect.visit(visitor);
+    }
+}
+
+// TODO(eddyb) find better names.
+#[derive(Copy, Clone)]
+pub enum Edges<T> {
+    One(T),
+    Branch { cond: Use<Val>, t: T, e: T },
+}
+
+impl<T: fmt::Debug> fmt::Debug for Edges<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Edges::One(edge) => write!(f, "-> {:?}", edge),
+            Edges::Branch { cond, t, e } => write!(f, "-> {:?} ? {:?} : {:?}", cond, t, e),
+        }
+    }
+}
+
+impl<T: Visit> Visit for Edges<T> {
+    fn walk(&self, visitor: &mut impl Visitor) {
+        match self {
+            Edges::One(edge) => {
+                edge.visit(visitor);
+            }
+            Edges::Branch { cond, t, e } => {
+                visitor.visit_val_use(*cond);
+                t.visit(visitor);
+                e.visit(visitor);
+            }
+        }
+    }
+}
+
+impl<T> Edges<T> {
+    pub fn as_ref(&self) -> Edges<&T> {
+        match self {
+            Edges::One(x) => Edges::One(x),
+            Edges::Branch { cond, t, e } => Edges::Branch { cond: *cond, t, e },
+        }
+    }
+    pub fn map<U>(self, mut f: impl FnMut(T, Option<bool>) -> U) -> Edges<U> {
+        match self {
+            Edges::One(x) => Edges::One(f(x, None)),
+            Edges::Branch { cond, t, e } => Edges::Branch {
+                cond,
+                t: f(t, Some(true)),
+                e: f(e, Some(false)),
+            },
+        }
+    }
+    pub fn merge(self, f: impl FnOnce(T, T) -> T) -> T {
+        match self {
+            Edges::One(x) => x,
+            Edges::Branch { t, e, .. } => f(t, e),
+        }
+    }
+    pub fn get(self, br_cond: Option<bool>) -> T {
+        match (self, br_cond) {
+            (Edges::One(x), None) => x,
+            (Edges::Branch { t, .. }, Some(true)) => t,
+            (Edges::Branch { e, .. }, Some(false)) => e,
+            _ => unreachable!(),
+        }
+    }
+}
+
 pub struct Block {
     pub pc: RangeTo<Const>,
-    pub state: RangeTo<State>,
-    pub effect: Effect,
+    pub edges: Edges<Edge>,
 }
 
 pub trait Arch: Sized {
@@ -932,11 +999,12 @@ pub trait Arch: Sized {
 
     fn default_regs(cx: &mut Cx<impl Platform<Arch = Self>>) -> Vec<Use<Val>>;
 
+    // FIXME(eddyb) replace the `Result` with a dedicated enum.
     fn lift_instr(
         cx: &mut Cx<impl Platform<Arch = Self>>,
         pc: &mut Const,
-        state: &mut State,
-    ) -> Option<Effect>;
+        state: State,
+    ) -> Result<State, Edges<Edge>>;
 }
 
 #[derive(Debug)]
@@ -953,7 +1021,13 @@ pub struct RawRom<T> {
 
 impl<T: Deref<Target = [u8]>> Rom for RawRom<T> {
     fn load(&self, addr: Const, size: MemSize) -> Result<Const, UnsupportedAddress> {
+        let err = UnsupportedAddress(addr);
         let addr = addr.as_u64();
+        if addr >= self.data.len() as u64
+            || addr + (size.bits() / 8 - 1) as u64 >= self.data.len() as u64
+        {
+            return Err(err);
+        }
         let b = |i| self.data[addr as usize + i];
 
         // FIXME(eddyb) deduplicate these if possible.
@@ -1050,7 +1124,7 @@ impl<P> Cx<P> {
     pub fn pretty_print<'a>(
         &'a self,
         principal: &'a (impl Visit + fmt::Debug),
-        state: Option<&'a State>,
+        edge_states: Option<Edges<&'a State>>,
     ) -> impl fmt::Display + 'a {
         struct Data {
             named_refcounts: PerKind<HashMap<Use<Val>, usize>, HashMap<Use<Mem>, usize>>,
@@ -1198,13 +1272,21 @@ impl<P> Cx<P> {
                 state_mem: None,
             },
         };
-        if let Some(state) = state {
-            if state.mem != self.default.mem {
-                collector.data.state_mem = Some(state.mem);
+        if let Some(edge_states) = edge_states {
+            let m = edge_states.map(|state, _| state.mem).merge(|t, e| {
+                assert_eq!(t, e);
+                t
+            });
+            if m != self.default.mem {
+                collector.data.state_mem = Some(m);
+                collector.visit_mem_use(m);
             }
 
-            for (i, &v) in state.regs.iter().enumerate() {
-                let default = self.default.regs[i];
+            for (i, &default) in self.default.regs.iter().enumerate() {
+                let v = edge_states.map(|state, _| state.regs[i]).merge(|t, e| {
+                    assert_eq!(t, e);
+                    t
+                });
                 if v == default {
                     continue;
                 }
@@ -1220,10 +1302,9 @@ impl<P> Cx<P> {
                     .val_to_state_regs
                     .entry(v)
                     .or_default()
-                    .push(r)
+                    .push(r);
+                collector.visit_val_use(v);
             }
-
-            state.visit(&mut collector);
         }
         principal.visit(&mut collector);
 
@@ -1232,7 +1313,7 @@ impl<P> Cx<P> {
             data: Data,
 
             principal: &'a T,
-            state: Option<&'a State>,
+            edge_states: Option<Edges<&'a State>>,
         }
 
         impl<P, T> fmt::Display for PrintFromDisplay<'_, P, T>
@@ -1249,8 +1330,14 @@ impl<P> Cx<P> {
                         seen: Default::default(),
                         empty: true,
                     };
-                    if let Some(state) = self.state {
-                        state.visit(&mut printer);
+                    if let Some(edge_states) = self.edge_states {
+                        match edge_states {
+                            Edges::One(state) => state.visit(&mut printer),
+                            Edges::Branch { t, e, .. } => {
+                                t.visit(&mut printer);
+                                e.visit(&mut printer);
+                            }
+                        }
                     }
                     self.principal.visit(&mut printer);
 
@@ -1269,7 +1356,7 @@ impl<P> Cx<P> {
             data: collector.data,
 
             principal,
-            state,
+            edge_states,
         }
     }
 }

@@ -22,7 +22,10 @@ fn analyze_and_dump<P: Platform>(platform: P, entries: impl Iterator<Item = Cons
         println!(
             "{:?} {}",
             bb,
-            cx.pretty_print(&block.effect, Some(&block.state.end))
+            cx.pretty_print(
+                &block.edges.as_ref().map(|e, _| e.effect),
+                Some(block.edges.as_ref().map(|e, _| &e.state))
+            )
         );
         last_end = block.pc.end.as_u64();
     }

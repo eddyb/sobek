@@ -3,7 +3,7 @@
 use crate::ir::{
     Arch,
     BitSize::{self, *},
-    Const, Cx, Effect, IntOp, Mem, MemRef, MemSize, Platform, Rom, State, Use, Val,
+    Const, Cx, Edge, Edges, Effect, IntOp, Mem, MemRef, MemSize, Platform, Rom, State, Use, Val,
 };
 
 pub struct _8051;
@@ -57,8 +57,8 @@ impl Arch for _8051 {
     fn lift_instr(
         cx: &mut Cx<impl Platform<Arch = Self>>,
         pc: &mut Const,
-        state: &mut State,
-    ) -> Option<Effect> {
+        mut state: State,
+    ) -> Result<State, Edges<Edge>> {
         let add1 = |x| IntOp::Add.eval(x, Const::new(x.size, 1)).unwrap();
 
         macro_rules! imm {
@@ -138,7 +138,10 @@ impl Arch for _8051 {
 
         macro_rules! jump {
             ($target:expr) => {
-                return Some(Effect::Jump($target));
+                return Err(Edges::One(Edge {
+                    effect: Effect::Jump($target),
+                    state,
+                }));
             };
         }
         macro_rules! call {
@@ -166,7 +169,11 @@ impl Arch for _8051 {
 
                 assert_eq!(cx[cond].size(), B1);
 
-                return Some(Effect::Branch { cond, t, e });
+                return Err(Edges::Branch {
+                    cond,
+                    t: Edge { state: state.clone(), effect: Effect::Jump(t) },
+                    e: Edge { state: state.clone(), effect: Effect::Jump(e) },
+                });
             }};
             ($cond:expr => $b:expr) => {
                 branch!($cond => $b, relative_target!(), cx.a(*pc))
@@ -561,6 +568,6 @@ impl Arch for _8051 {
             }
         }
 
-        None
+        Ok(state)
     }
 }

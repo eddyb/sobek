@@ -1,7 +1,8 @@
 use crate::ir::{
     Arch,
     BitSize::{self, *},
-    Const, Cx, Effect, IntOp, Mem, MemRef, MemSize, Platform, Reg, Rom, State, Use, Val,
+    Const, Cx, Edge, Edges, Effect, IntOp, Mem, MemRef, MemSize, Platform, Reg, Rom, State, Use,
+    Val,
 };
 use std::iter;
 
@@ -82,8 +83,8 @@ impl Arch for Mips32 {
     fn lift_instr(
         cx: &mut Cx<impl Platform<Arch = Self>>,
         pc: &mut Const,
-        state: &mut State,
-    ) -> Option<Effect> {
+        mut state: State,
+    ) -> Result<State, Edges<Edge>> {
         let instr = cx.platform.rom().load(*pc, MemSize::M32).unwrap().as_u32();
         let add4 = |x| IntOp::Add.eval(x, Const::new(x.size, 4)).unwrap();
         *pc = add4(*pc);
@@ -125,8 +126,13 @@ impl Arch for Mips32 {
             ($target:expr) => {{
                 let target = $target;
                 // Process delay slot.
-                assert_eq!(Self::lift_instr(cx, pc, state), None);
-                return Some(Effect::Jump(target));
+                state = Self::lift_instr(cx, pc, state)
+                    .map_err(|edges| edges.map(|e, _| e.effect))
+                    .expect("mips: delay slots should be effect-less");
+                return Err(Edges::One(Edge {
+                    state,
+                    effect: Effect::Jump(target),
+                }));
             }};
         }
         macro_rules! branch_target {
@@ -148,8 +154,14 @@ impl Arch for Mips32 {
                 assert_eq!(cx[cond].size(), B1);
 
                 // Process delay slot.
-                assert_eq!(Self::lift_instr(cx, pc, state), None);
-                return Some(Effect::Branch { cond, t, e });
+                state = Self::lift_instr(cx, pc, state)
+                    .map_err(|edges| edges.map(|e, _| e.effect))
+                    .expect("mips: delay slots should be effect-less");
+                return Err(Edges::Branch {
+                    cond,
+                    t: Edge { state: state.clone(), effect: Effect::Jump(t) },
+                    e: Edge { state: state.clone(), effect: Effect::Jump(e) },
+                });
             }};
             ($cond:expr => $b:expr) => {
                 branch!($cond => $b, branch_target!(), cx.a(add4(*pc)))
@@ -161,12 +173,20 @@ impl Arch for Mips32 {
             let funct = field(0, 6);
             match funct {
                 12 => {
-                    return Some(Effect::PlatformCall {
-                        code: field(6, 20),
-                        ret_pc: *pc,
-                    });
+                    return Err(Edges::One(Edge {
+                        state,
+                        effect: Effect::PlatformCall {
+                            code: field(6, 20),
+                            ret_pc: cx.a(*pc),
+                        },
+                    }));
                 }
-                13 => return Some(Effect::Trap { code: field(6, 20) }),
+                13 => {
+                    return Err(Edges::One(Edge {
+                        state,
+                        effect: Effect::Trap { code: field(6, 20) },
+                    }))
+                }
                 _ => {}
             }
 
@@ -195,7 +215,7 @@ impl Arch for Mips32 {
 
                 funct => {
                     eprintln!("mips: SPECIAL/funct={} unknown", funct);
-                    return None;
+                    return Ok(state);
                 }
             };
             state.set(rd, v);
@@ -207,7 +227,7 @@ impl Arch for Mips32 {
                 1 => branch!(val!(Int(IntOp::LtS, B32, rs, zero)) => false),
                 _ => {
                     eprintln!("mips: REGIMM/rt={} unknown", rt);
-                    return None;
+                    return Ok(state);
                 }
             }
         } else if op == 2 || op == 3 {
@@ -285,6 +305,6 @@ impl Arch for Mips32 {
             }
         }
 
-        None
+        Ok(state)
     }
 }
