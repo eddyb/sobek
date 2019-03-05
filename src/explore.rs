@@ -328,7 +328,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
                             }
                         }
 
-                        println!(
+                        panic!(
                             "explore: {:?} -> {:?} reaches {:?}/{} and then also {:?}/{}",
                             bb,
                             direct_target_bb,
@@ -337,11 +337,6 @@ impl<'a, P: Platform> Explorer<'a, P> {
                             final_target_bb,
                             self.cx.pretty_print(&arg_values)
                         );
-                        return Exit {
-                            targets: Set1::Many,
-                            arg_values: Set1::Many,
-                            partial,
-                        };
                     }
                 }
 
