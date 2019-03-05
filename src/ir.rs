@@ -738,6 +738,13 @@ pub trait Visit {
     }
 }
 
+impl<A: Visit, B: Visit> Visit for (A, B) {
+    fn walk(&self, visitor: &mut impl Visitor) {
+        self.0.visit(visitor);
+        self.1.visit(visitor);
+    }
+}
+
 impl<T: Visit> Visit for &'_ T {
     fn walk(&self, visitor: &mut impl Visitor) {
         (**self).walk(visitor);
@@ -875,7 +882,7 @@ pub enum Effect {
 impl fmt::Debug for Effect {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Effect::Jump(target) => write!(f, "{:?}", target),
+            Effect::Jump(target) => write!(f, "Jump({:?})", target),
             Effect::PlatformCall { code, ret_pc } => {
                 write!(f, "PlatformCall({}) -> {:?}", code, ret_pc)
             }
@@ -936,8 +943,10 @@ pub enum Edges<T> {
 impl<T: fmt::Debug> fmt::Debug for Edges<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Edges::One(edge) => write!(f, "-> {:?}", edge),
-            Edges::Branch { cond, t, e } => write!(f, "-> {:?} ? {:?} : {:?}", cond, t, e),
+            Edges::One(edge) => write!(f, "{:?}", edge),
+            Edges::Branch { cond, t, e } => {
+                write!(f, "if {:?} {{ {:?} }} else {{ {:?} }}", cond, t, e)
+            }
         }
     }
 }
@@ -950,23 +959,6 @@ impl<T: Visit> Visit for Edges<T> {
             }
             Edges::Branch { cond, t, e } => {
                 visitor.visit_val_use(*cond);
-                t.visit(visitor);
-                e.visit(visitor);
-            }
-        }
-    }
-}
-
-impl<T: Visit> Edges<T> {
-    pub fn walk_skipping_cond(&self, visitor: &mut impl Visitor)
-    where
-        T: Visit,
-    {
-        match self {
-            Edges::One(edge) => {
-                edge.visit(visitor);
-            }
-            Edges::Branch { t, e, .. } => {
                 t.visit(visitor);
                 e.visit(visitor);
             }
@@ -1141,14 +1133,13 @@ where
 impl<P> Cx<P> {
     pub fn pretty_print<'a>(
         &'a self,
-        principal: &'a (impl Visit + fmt::Debug),
+        value: &'a (impl Visit + fmt::Debug),
     ) -> impl fmt::Display + 'a {
-        self.pretty_print_on_edges(principal, Edges::One(&self.default))
+        self.pretty_print_on_edges(Edges::One((&self.default, value)))
     }
     pub fn pretty_print_on_edges<'a>(
         &'a self,
-        principal: &'a (impl Visit + fmt::Debug),
-        edge_states: Edges<&'a State>,
+        edge_states_and_values: Edges<(&'a State, &'a (impl Visit + fmt::Debug))>,
     ) -> impl fmt::Display + 'a {
         struct Data {
             use_counts: PerKind<HashMap<Use<Val>, usize>, HashMap<Use<Mem>, usize>>,
@@ -1351,10 +1342,12 @@ impl<P> Cx<P> {
         };
 
         {
-            let m = edge_states.map(|state, _| state.mem).merge(|t, e| {
-                assert_eq!(t, e);
-                t
-            });
+            let m = edge_states_and_values
+                .map(|(state, _), _| state.mem)
+                .merge(|t, e| {
+                    assert_eq!(t, e);
+                    t
+                });
             if m != self.default.mem {
                 use_counter.data.state_mem = Some(m);
                 use_counter.visit_mem_use(m);
@@ -1362,10 +1355,12 @@ impl<P> Cx<P> {
         }
 
         for (i, &default) in self.default.regs.iter().enumerate() {
-            let v = edge_states.map(|state, _| state.regs[i]).merge(|t, e| {
-                assert_eq!(t, e);
-                t
-            });
+            let v = edge_states_and_values
+                .map(|(state, _), _| state.regs[i])
+                .merge(|t, e| {
+                    assert_eq!(t, e);
+                    t
+                });
             if v == default {
                 continue;
             }
@@ -1384,22 +1379,21 @@ impl<P> Cx<P> {
                 .push(r);
             use_counter.visit_val_use(v);
         }
-        principal.visit(&mut use_counter);
+        edge_states_and_values
+            .map(|(_, value), _| value)
+            .visit(&mut use_counter);
 
-        let mut numberer = Numberer {
+        edge_states_and_values.visit(&mut Numberer {
             cx: self,
             data: &mut data,
             allow_inline: true,
-        };
-        edge_states.walk_skipping_cond(&mut numberer);
-        principal.visit(&mut numberer);
+        });
 
         struct PrintFromDisplay<'a, P, T> {
             cx: &'a Cx<P>,
             data: Data,
 
-            principal: &'a T,
-            edge_states: Edges<&'a State>,
+            edge_states_and_values: Edges<(&'a State, &'a T)>,
         }
 
         impl<P, T> fmt::Display for PrintFromDisplay<'_, P, T>
@@ -1416,13 +1410,13 @@ impl<P> Cx<P> {
                         seen: Default::default(),
                         empty: true,
                     };
-                    self.edge_states.walk_skipping_cond(&mut printer);
-                    self.principal.visit(&mut printer);
+                    self.edge_states_and_values.visit(&mut printer);
 
+                    let edge_values = self.edge_states_and_values.map(|(_, value), _| value);
                     if printer.empty {
-                        write!(f, "{:?}", self.principal)
+                        write!(f, "{:?}", edge_values)
                     } else {
-                        writeln!(f, "    {:?}", self.principal)?;
+                        writeln!(f, "    {:?}", edge_values)?;
                         write!(f, "}}")
                     }
                 })
@@ -1433,8 +1427,7 @@ impl<P> Cx<P> {
             cx: self,
             data,
 
-            principal,
-            edge_states,
+            edge_states_and_values,
         }
     }
 }
