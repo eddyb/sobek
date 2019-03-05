@@ -235,7 +235,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
             println!(
                 "explore: entry {:?} reaches unknown exit target {}",
                 entry_bb,
-                self.cx.pretty_print(&target, None)
+                self.cx.pretty_print(&target)
             );
         });
     }
@@ -272,8 +272,8 @@ impl<'a, P: Platform> Explorer<'a, P> {
                                 "explore: {:?} -> {:?} reached unexpected constant {}/{}",
                                 bb,
                                 direct_target_bb,
-                                self.cx.pretty_print(&target_exit.targets, None),
-                                self.cx.pretty_print(&target_exit.arg_values, None)
+                                self.cx.pretty_print(&target_exit.targets),
+                                self.cx.pretty_print(&target_exit.arg_values)
                             );
                         }
                     }
@@ -333,9 +333,9 @@ impl<'a, P: Platform> Explorer<'a, P> {
                             bb,
                             direct_target_bb,
                             target_bb,
-                            self.cx.pretty_print(&target_exit.arg_values, None),
+                            self.cx.pretty_print(&target_exit.arg_values),
                             final_target_bb,
-                            self.cx.pretty_print(&arg_values, None)
+                            self.cx.pretty_print(&arg_values)
                         );
                         return Exit {
                             targets: Set1::Many,
@@ -382,8 +382,8 @@ impl<'a, P: Platform> Explorer<'a, P> {
                         println!(
                             "explore: {:?}: ambiguous targets: {} vs {}",
                             bb,
-                            self.cx.pretty_print(&t, None),
-                            self.cx.pretty_print(&e, None)
+                            self.cx.pretty_print(&t),
+                            self.cx.pretty_print(&e)
                         );
                     }
                 }
@@ -446,8 +446,8 @@ impl<'a, P: Platform> Explorer<'a, P> {
                             println!(
                                 "explore: {:?} changed a value from {} to {}",
                                 bb,
-                                cx.pretty_print(&old, None),
-                                cx.pretty_print(&new, None)
+                                cx.pretty_print(&old),
+                                cx.pretty_print(&new)
                             )
                         }
                         false

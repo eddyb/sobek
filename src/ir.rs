@@ -1142,7 +1142,13 @@ impl<P> Cx<P> {
     pub fn pretty_print<'a>(
         &'a self,
         principal: &'a (impl Visit + fmt::Debug),
-        edge_states: Option<Edges<&'a State>>,
+    ) -> impl fmt::Display + 'a {
+        self.pretty_print_on_edges(principal, Edges::One(&self.default))
+    }
+    pub fn pretty_print_on_edges<'a>(
+        &'a self,
+        principal: &'a (impl Visit + fmt::Debug),
+        edge_states: Edges<&'a State>,
     ) -> impl fmt::Display + 'a {
         struct Data {
             use_counts: PerKind<HashMap<Use<Val>, usize>, HashMap<Use<Mem>, usize>>,
@@ -1343,7 +1349,8 @@ impl<P> Cx<P> {
             cx: self,
             data: &mut data,
         };
-        if let Some(edge_states) = edge_states {
+
+        {
             let m = edge_states.map(|state, _| state.mem).merge(|t, e| {
                 assert_eq!(t, e);
                 t
@@ -1352,30 +1359,30 @@ impl<P> Cx<P> {
                 use_counter.data.state_mem = Some(m);
                 use_counter.visit_mem_use(m);
             }
+        }
 
-            for (i, &default) in self.default.regs.iter().enumerate() {
-                let v = edge_states.map(|state, _| state.regs[i]).merge(|t, e| {
-                    assert_eq!(t, e);
-                    t
-                });
-                if v == default {
-                    continue;
-                }
-
-                // HACK(eddyb) try to guess the register name.
-                // Ideally this would be provided by the `Arch`.
-                let r = match self[default] {
-                    Val::InReg(r) if i == r.index => r,
-                    default => panic!("register #{} has non-register default {:?}", i, default),
-                };
-                use_counter
-                    .data
-                    .val_to_state_regs
-                    .entry(v)
-                    .or_default()
-                    .push(r);
-                use_counter.visit_val_use(v);
+        for (i, &default) in self.default.regs.iter().enumerate() {
+            let v = edge_states.map(|state, _| state.regs[i]).merge(|t, e| {
+                assert_eq!(t, e);
+                t
+            });
+            if v == default {
+                continue;
             }
+
+            // HACK(eddyb) try to guess the register name.
+            // Ideally this would be provided by the `Arch`.
+            let r = match self[default] {
+                Val::InReg(r) if i == r.index => r,
+                default => panic!("register #{} has non-register default {:?}", i, default),
+            };
+            use_counter
+                .data
+                .val_to_state_regs
+                .entry(v)
+                .or_default()
+                .push(r);
+            use_counter.visit_val_use(v);
         }
         principal.visit(&mut use_counter);
 
@@ -1384,9 +1391,7 @@ impl<P> Cx<P> {
             data: &mut data,
             allow_inline: true,
         };
-        if let Some(edge_states) = edge_states {
-            edge_states.walk_skipping_cond(&mut numberer);
-        }
+        edge_states.walk_skipping_cond(&mut numberer);
         principal.visit(&mut numberer);
 
         struct PrintFromDisplay<'a, P, T> {
@@ -1394,7 +1399,7 @@ impl<P> Cx<P> {
             data: Data,
 
             principal: &'a T,
-            edge_states: Option<Edges<&'a State>>,
+            edge_states: Edges<&'a State>,
         }
 
         impl<P, T> fmt::Display for PrintFromDisplay<'_, P, T>
@@ -1411,9 +1416,7 @@ impl<P> Cx<P> {
                         seen: Default::default(),
                         empty: true,
                     };
-                    if let Some(edge_states) = self.edge_states {
-                        edge_states.walk_skipping_cond(&mut printer);
-                    }
+                    self.edge_states.walk_skipping_cond(&mut printer);
                     self.principal.visit(&mut printer);
 
                     if printer.empty {

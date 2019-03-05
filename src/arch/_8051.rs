@@ -511,7 +511,7 @@ impl Arch for _8051 {
                         } else {
                             eprintln!(
                                 "8051: unsupported dynamic MOVC address: {}",
-                                cx.pretty_print(&addr, None)
+                                cx.pretty_print(&addr)
                             )
                         }
                     }
