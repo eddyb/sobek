@@ -172,7 +172,7 @@ impl Arch for _8051 {
                 return Err(Edges::Branch {
                     cond,
                     t: Edge { state: state.clone(), effect: Effect::Jump(t) },
-                    e: Edge { state: state.clone(), effect: Effect::Jump(e) },
+                    e: Edge { state: state, effect: Effect::Jump(e) },
                 });
             }};
             ($cond:expr => $b:expr) => {
