@@ -512,7 +512,14 @@ impl Arch for _8051 {
                             eprintln!(
                                 "8051: unsupported dynamic MOVC address: {}",
                                 cx.pretty_print(&addr)
-                            )
+                            );
+                            // HACK(eddyb) this uses a B16 memory address to
+                            // avoid accidentally aliasing B8 memory addresses.
+                            state.regs[Reg::A as usize] = val!(Load(MemRef {
+                                mem: state.mem,
+                                addr,
+                                size: MemSize::M8,
+                            }));
                         }
                     }
                 }
