@@ -2,6 +2,7 @@ use scoped_tls::scoped_thread_local;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::marker::PhantomData;
+use std::mem;
 use std::ops::Deref;
 use std::ops::{Index, RangeTo};
 
@@ -956,6 +957,23 @@ impl<T: Visit> Visit for Edges<T> {
     }
 }
 
+impl<T: Visit> Edges<T> {
+    pub fn walk_skipping_cond(&self, visitor: &mut impl Visitor)
+    where
+        T: Visit,
+    {
+        match self {
+            Edges::One(edge) => {
+                edge.visit(visitor);
+            }
+            Edges::Branch { t, e, .. } => {
+                t.visit(visitor);
+                e.visit(visitor);
+            }
+        }
+    }
+}
+
 impl<T> Edges<T> {
     pub fn as_ref(&self) -> Edges<&T> {
         match self {
@@ -1127,7 +1145,8 @@ impl<P> Cx<P> {
         edge_states: Option<Edges<&'a State>>,
     ) -> impl fmt::Display + 'a {
         struct Data {
-            named_refcounts: PerKind<HashMap<Use<Val>, usize>, HashMap<Use<Mem>, usize>>,
+            use_counts: PerKind<HashMap<Use<Val>, usize>, HashMap<Use<Mem>, usize>>,
+            numbered_counts: PerKind<usize, usize>,
             locals: PerKind<
                 HashMap<Use<Val>, Result<usize, Val>>,
                 HashMap<Use<Mem>, Result<usize, Mem>>,
@@ -1136,12 +1155,12 @@ impl<P> Cx<P> {
             state_mem: Option<Use<Mem>>,
         }
 
-        struct Collector<'a, P> {
+        struct UseCounter<'a, P> {
             cx: &'a Cx<P>,
-            data: Data,
+            data: &'a mut Data,
         }
 
-        impl<P> Visitor for Collector<'_, P> {
+        impl<P> Visitor for UseCounter<'_, P> {
             type Platform = P;
 
             fn cx(&self) -> &Cx<Self::Platform> {
@@ -1149,30 +1168,79 @@ impl<P> Cx<P> {
             }
 
             fn visit_val_use(&mut self, v: Use<Val>) {
-                // FIXME(eddyb) skip entire already-visited subtrees.
-                v.walk(self);
-
-                self.data.locals.val.entry(v).or_insert(match self.cx[v] {
-                    v @ Val::InReg(_) | v @ Val::Const(_) => Err(v),
-                    _ => Ok({
-                        let next = self.data.named_refcounts.val.len();
-                        *self.data.named_refcounts.val.entry(v).or_insert(0) += 1;
-                        next
-                    }),
-                });
+                let count = self.data.use_counts.val.entry(v).or_insert(0);
+                *count += 1;
+                if *count == 1 {
+                    v.walk(self);
+                }
             }
             fn visit_mem_use(&mut self, m: Use<Mem>) {
-                // FIXME(eddyb) skip entire already-visited subtrees.
-                m.walk(self);
+                let count = self.data.use_counts.mem.entry(m).or_insert(0);
+                *count += 1;
+                if *count == 1 {
+                    m.walk(self);
+                }
+            }
+        }
 
-                self.data.locals.mem.entry(m).or_insert(match self.cx[m] {
-                    m @ Mem::In => Err(m),
-                    _ => Ok({
-                        let next = self.data.named_refcounts.mem.len();
-                        *self.data.named_refcounts.mem.entry(m).or_insert(0) += 1;
-                        next
-                    }),
-                });
+        struct Numberer<'a, P> {
+            cx: &'a Cx<P>,
+            data: &'a mut Data,
+            allow_inline: bool,
+        }
+
+        impl<P> Visitor for Numberer<'_, P> {
+            type Platform = P;
+
+            fn cx(&self) -> &Cx<Self::Platform> {
+                self.cx
+            }
+
+            fn visit_val_use(&mut self, v: Use<Val>) {
+                if self.data.locals.val.contains_key(&v) {
+                    return;
+                }
+
+                let allowed_inline = mem::replace(&mut self.allow_inline, false);
+                v.walk(self);
+                self.allow_inline = allowed_inline;
+
+                let val = self.cx[v];
+                let inline = match val {
+                    Val::InReg(_) | Val::Const(_) => true,
+                    _ => allowed_inline && self.data.use_counts.val[&v] == 1,
+                };
+                let local = if inline {
+                    Err(val)
+                } else {
+                    let next = self.data.numbered_counts.val;
+                    self.data.numbered_counts.val += 1;
+                    Ok(next)
+                };
+                self.data.locals.val.insert(v, local);
+            }
+            fn visit_mem_use(&mut self, m: Use<Mem>) {
+                if self.data.locals.mem.contains_key(&m) {
+                    return;
+                }
+
+                let allowed_inline = mem::replace(&mut self.allow_inline, false);
+                m.walk(self);
+                self.allow_inline = allowed_inline;
+
+                let mem = self.cx[m];
+                let inline = match mem {
+                    Mem::In => true,
+                    _ => allowed_inline && self.data.use_counts.mem[&m] == 1,
+                };
+                let local = if inline {
+                    Err(mem)
+                } else {
+                    let next = self.data.numbered_counts.mem;
+                    self.data.numbered_counts.mem += 1;
+                    Ok(next)
+                };
+                self.data.locals.mem.insert(m, local);
             }
         }
 
@@ -1223,8 +1291,8 @@ impl<P> Cx<P> {
                         write_name!("{:?}", r);
                     }
                 }
-                if let Some(&total) = self.data.named_refcounts.val.get(&v) {
-                    if names < total {
+                if self.data.locals.val[&v].is_ok() {
+                    if names < self.data.use_counts.val[&v] {
                         write_name!("{:?}", v);
                     }
                 }
@@ -1252,8 +1320,8 @@ impl<P> Cx<P> {
                 if Some(m) == self.data.state_mem {
                     write_name!("m");
                 }
-                if let Some(&total) = self.data.named_refcounts.mem.get(&m) {
-                    if names < total {
+                if self.data.locals.mem[&m].is_ok() {
+                    if names < self.data.use_counts.mem[&m] {
                         write_name!("{:?}", m);
                     }
                 }
@@ -1263,14 +1331,17 @@ impl<P> Cx<P> {
             }
         }
 
-        let mut collector = Collector {
+        let mut data = Data {
+            use_counts: Default::default(),
+            numbered_counts: Default::default(),
+            locals: Default::default(),
+            val_to_state_regs: Default::default(),
+            state_mem: None,
+        };
+
+        let mut use_counter = UseCounter {
             cx: self,
-            data: Data {
-                named_refcounts: Default::default(),
-                locals: Default::default(),
-                val_to_state_regs: Default::default(),
-                state_mem: None,
-            },
+            data: &mut data,
         };
         if let Some(edge_states) = edge_states {
             let m = edge_states.map(|state, _| state.mem).merge(|t, e| {
@@ -1278,8 +1349,8 @@ impl<P> Cx<P> {
                 t
             });
             if m != self.default.mem {
-                collector.data.state_mem = Some(m);
-                collector.visit_mem_use(m);
+                use_counter.data.state_mem = Some(m);
+                use_counter.visit_mem_use(m);
             }
 
             for (i, &default) in self.default.regs.iter().enumerate() {
@@ -1297,16 +1368,26 @@ impl<P> Cx<P> {
                     Val::InReg(r) if i == r.index => r,
                     default => panic!("register #{} has non-register default {:?}", i, default),
                 };
-                collector
+                use_counter
                     .data
                     .val_to_state_regs
                     .entry(v)
                     .or_default()
                     .push(r);
-                collector.visit_val_use(v);
+                use_counter.visit_val_use(v);
             }
         }
-        principal.visit(&mut collector);
+        principal.visit(&mut use_counter);
+
+        let mut numberer = Numberer {
+            cx: self,
+            data: &mut data,
+            allow_inline: true,
+        };
+        if let Some(edge_states) = edge_states {
+            edge_states.walk_skipping_cond(&mut numberer);
+        }
+        principal.visit(&mut numberer);
 
         struct PrintFromDisplay<'a, P, T> {
             cx: &'a Cx<P>,
@@ -1331,13 +1412,7 @@ impl<P> Cx<P> {
                         empty: true,
                     };
                     if let Some(edge_states) = self.edge_states {
-                        match edge_states {
-                            Edges::One(state) => state.visit(&mut printer),
-                            Edges::Branch { t, e, .. } => {
-                                t.visit(&mut printer);
-                                e.visit(&mut printer);
-                            }
-                        }
+                        edge_states.walk_skipping_cond(&mut printer);
                     }
                     self.principal.visit(&mut printer);
 
@@ -1353,7 +1428,7 @@ impl<P> Cx<P> {
 
         PrintFromDisplay {
             cx: self,
-            data: collector.data,
+            data,
 
             principal,
             edge_states,
