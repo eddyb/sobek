@@ -5,6 +5,7 @@ use crate::ir::{
     BitSize::{self, *},
     Const, Cx, Edge, Edges, Effect, IntOp, Mem, MemRef, MemSize, Platform, Rom, State, Use, Val,
 };
+use std::iter;
 
 pub struct _8051;
 
@@ -16,6 +17,9 @@ enum Reg {
     PSW = 0x50,
     A = 0x60,
     B = 0x70,
+
+    #[allow(non_camel_case_types)]
+    PSW_C = 0x80,
 }
 
 // FIXME(eddyb) don't make every SFR a register, if reads are not
@@ -28,7 +32,7 @@ impl Arch for _8051 {
     fn default_regs(cx: &mut Cx<impl Platform<Arch = Self>>) -> Vec<Use<Val>> {
         (0..0x80)
             .map(|i| {
-                Val::InReg(crate::ir::Reg {
+                crate::ir::Reg {
                     index: i,
                     size: B8,
                     name: if i == Reg::SP as usize {
@@ -48,9 +52,14 @@ impl Arch for _8051 {
                         // to avoid having to hardcode all the register names.
                         Box::leak(format!("sfr_{:02x}", i).into_boxed_str())
                     },
-                })
+                }
             })
-            .map(|v| cx.a(v))
+            .chain(iter::once(crate::ir::Reg {
+                index: Reg::PSW_C as usize,
+                size: B1,
+                name: "psw.c",
+            }))
+            .map(|v| cx.a(Val::InReg(v)))
             .collect()
     }
 
@@ -206,7 +215,11 @@ impl Arch for _8051 {
             ($operand:expr) => {
                 match $operand {
                     Operand::Imm(x) => cx.a(x),
-                    Operand::Reg(i) => state.regs[i],
+                    Operand::Reg(i) => {
+                        // FIXME(eddyb) emulate `PSW` reads by composing it out of bits.
+                        assert!(i != Reg::PSW as usize);
+                        state.regs[i]
+                    }
                     Operand::Mem(m) => val!(Load(m)),
                 }
             };
@@ -219,7 +232,11 @@ impl Arch for _8051 {
                 let val = $val;
                 match $operand {
                     Operand::Imm(_) => unreachable!(),
-                    Operand::Reg(i) => state.regs[i] = val,
+                    Operand::Reg(i) => {
+                        // FIXME(eddyb) emulate `PSW` writes by splitting it into bits.
+                        assert!(i != Reg::PSW as usize);
+                        state.regs[i] = val;
+                    }
                     Operand::Mem(m) => state.mem = mem!(Store(m, val)),
                 }
             }};
@@ -236,16 +253,6 @@ impl Arch for _8051 {
                     Operand::Mem(mem_ref!(cx.a(addr)))
                 }
             }};
-        }
-        macro_rules! carry_in {
-            () => {
-                val!(Int(
-                    IntOp::ShrU,
-                    B8,
-                    state.regs[Reg::PSW as usize],
-                    cx.a(Const::new(B8, 7))
-                ))
-            };
         }
 
         if (op & 0xf) >= 4 {
@@ -273,18 +280,31 @@ impl Arch for _8051 {
                     set!(val!(int_sub(get!(), cx.a(Const::new(B8, 1)))));
                 }
                 2 => {
-                    state.regs[Reg::A as usize] =
-                        val!(Int(IntOp::Add, B8, state.regs[Reg::A as usize], get!()));
-                    // FIXME(eddyb) set the carry bit.
+                    let (a, b) = (state.regs[Reg::A as usize], get!());
+                    // HACK(eddyb) this computes the result & carry by
+                    // doing the operation with 16 bits instead of 8.
+                    let wide = val!(Int(IntOp::Add, B16, val!(Zext(B16, a)), val!(Zext(B16, b))));
+                    state.regs[Reg::A as usize] = val!(Trunc(B8, wide));
+                    state.regs[Reg::PSW_C as usize] = val!(Trunc(
+                        B1,
+                        val!(Int(IntOp::ShrU, B16, wide, cx.a(Const::new(B8, 8))))
+                    ));
                 }
                 3 => {
-                    state.regs[Reg::A as usize] = val!(Int(
+                    let (a, b) = (state.regs[Reg::A as usize], get!());
+                    // HACK(eddyb) this computes the result & carry by
+                    // doing the operation with 16 bits instead of 8.
+                    let wide = val!(Int(
                         IntOp::Add,
-                        B8,
-                        val!(Int(IntOp::Add, B8, state.regs[Reg::A as usize], get!())),
-                        carry_in!()
+                        B16,
+                        val!(Int(IntOp::Add, B16, val!(Zext(B16, a)), val!(Zext(B16, b)))),
+                        val!(Zext(B16, state.regs[Reg::PSW_C as usize]))
                     ));
-                    // FIXME(eddyb) set the carry bit.
+                    state.regs[Reg::A as usize] = val!(Trunc(B8, wide));
+                    state.regs[Reg::PSW_C as usize] = val!(Trunc(
+                        B1,
+                        val!(Int(IntOp::ShrU, B16, wide, cx.a(Const::new(B8, 8))))
+                    ));
                 }
                 4 => {
                     state.regs[Reg::A as usize] =
@@ -313,7 +333,7 @@ impl Arch for _8051 {
                 9 => {
                     state.regs[Reg::A as usize] = val!(int_sub(
                         val!(int_sub(state.regs[Reg::A as usize], get!())),
-                        carry_in!()
+                        val!(Zext(B8, state.regs[Reg::PSW_C as usize]))
                     ));
                     // FIXME(eddyb) set the carry bit.
                 }
@@ -433,7 +453,7 @@ impl Arch for _8051 {
                     ))
                 }
                 0x40 | 0x50 => {
-                    branch!(val!(Int(IntOp::Eq, B8, carry_in!(), cx.a(Const::new(B8, 0)))) => op == 0x50);
+                    branch!(val!(Int(IntOp::Eq, B1, state.regs[Reg::PSW_C as usize], cx.a(Const::new(B1, 0)))) => op == 0x50);
                 }
                 0x60 | 0x70 => {
                     branch!(val!(Int(IntOp::Eq, B8, state.regs[Reg::A as usize], cx.a(Const::new(B8, 0)))) => op == 0x60);
@@ -458,30 +478,33 @@ impl Arch for _8051 {
                 }
                 0x72 | 0x82 | 0xa0 | 0xa2 | 0xb0 => {
                     let bit = bit_addr!();
-                    // FIXME(eddyb) somehow abstract carry flag manipulation?
-                    let mut val = get!();
-                    if op == 0xa0 || op == 0xb0 {
-                        val = val!(bit_not(val));
-                    }
-                    let mut psw = state.regs[Reg::PSW as usize];
-                    if op == 0xa2 {
-                        psw = val!(Int(IntOp::And, B8, psw, cx.a(Const::new(B8, 0x7f))));
-                    }
-                    state.regs[Reg::PSW as usize] = val!(Int(
-                        if op == 0x72 || op == 0xa0 || op == 0xa2 {
-                            IntOp::Or
-                        } else {
-                            IntOp::And
-                        },
-                        B8,
-                        psw,
+                    let val = val!(Trunc(
+                        B1,
                         val!(Int(
-                            IntOp::Shl,
+                            IntOp::ShrU,
                             B8,
-                            val!(Int(IntOp::And, B8, val, cx.a(Const::new(B8, 1 << bit)))),
-                            cx.a(Const::new(B8, (7 - bit) as u64))
+                            get!(),
+                            cx.a(Const::new(B8, bit as u64))
                         ))
                     ));
+                    state.regs[Reg::PSW_C as usize] = match op {
+                        0xa2 => val,
+
+                        0x72 => val!(Int(IntOp::Or, B1, state.regs[Reg::PSW_C as usize], val)),
+                        0xa0 => val!(Int(
+                            IntOp::Or,
+                            B1,
+                            state.regs[Reg::PSW_C as usize],
+                            val!(bit_not(val))
+                        )),
+                        0xb0 => val!(Int(
+                            IntOp::And,
+                            B1,
+                            state.regs[Reg::PSW_C as usize],
+                            val!(bit_not(val))
+                        )),
+                        _ => unreachable!(),
+                    }
                 }
                 0x73 | 0x83 | 0x93 => {
                     let addr = val!(Int(
@@ -537,7 +560,7 @@ impl Arch for _8051 {
                         val!(Int(
                             IntOp::Shl,
                             B8,
-                            carry_in!(),
+                            val!(Zext(B8, state.regs[Reg::PSW_C as usize])),
                             cx.a(Const::new(B8, bit as u64))
                         ))
                     )));
