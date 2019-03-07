@@ -1,5 +1,6 @@
 use sobek::arch::mips::Mips32;
 use sobek::arch::_8051::_8051;
+use sobek::arch::_8080::_8080;
 use sobek::explore::{BlockId, Explorer};
 use sobek::ir::{BitSize, Const, Cx, Platform, RawRom, SimplePlatform};
 use sobek::platform::n64::{self, N64};
@@ -44,6 +45,36 @@ fn main() {
                     },
                 },
                 iter::once(Const::new(BitSize::B16, 0)),
+            );
+        }
+        "8080" => {
+            analyze_and_dump(
+                SimplePlatform {
+                    arch: _8080 {
+                        flavor: sobek::arch::_8080::Flavor::Intel,
+                    },
+                    rom: RawRom {
+                        big_endian: false,
+                        data,
+                    },
+                },
+                iter::once(Const::new(BitSize::B16, 0)),
+            );
+        }
+        "gb" => {
+            analyze_and_dump(
+                SimplePlatform {
+                    arch: _8080 {
+                        flavor: sobek::arch::_8080::Flavor::LR35902,
+                    },
+                    rom: RawRom {
+                        big_endian: false,
+                        data,
+                    },
+                },
+                iter::once(0x100)
+                    .chain((0..5).map(|i| 0x40 + i * 8))
+                    .map(|x| Const::new(BitSize::B16, x)),
             );
         }
         "n64" => {
