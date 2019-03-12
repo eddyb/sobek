@@ -85,7 +85,16 @@ impl Arch for Mips32 {
         pc: &mut Const,
         mut state: State,
     ) -> Result<State, Edges<Edge>> {
-        let instr = cx.platform.rom().load(*pc, MemSize::M32).unwrap().as_u32();
+        let instr = match cx.platform.rom().load(*pc, MemSize::M32) {
+            Ok(x) => x.as_u32(),
+            Err(e) => {
+                eprintln!("mips: failed to read ROM, emitting `Trap(0)`: {:?}", e);
+                return Err(Edges::One(Edge {
+                    state,
+                    effect: Effect::Trap { code: 0 },
+                }));
+            }
+        };
         let add4 = |x| IntOp::Add.eval(x, Const::new(x.size, 4)).unwrap();
         *pc = add4(*pc);
 
@@ -126,9 +135,18 @@ impl Arch for Mips32 {
             ($target:expr) => {{
                 let target = $target;
                 // Process delay slot.
-                state = Self::lift_instr(cx, pc, state)
-                    .map_err(|edges| edges.map(|e, _| e.effect))
-                    .expect("mips: delay slots should be effect-less");
+                let delay_pc = *pc;
+                state = Self::lift_instr(cx, pc, state).map_err(|edges| {
+                    eprintln!(
+                        "mips: delay slot at {:?} had effect, emitting `Trap(1)`: {}",
+                        delay_pc,
+                        cx.pretty_print_on_edges(edges.as_ref().map(|e, _| &e.effect))
+                    );
+                    edges.map(|e, _| Edge {
+                        state: e.state,
+                        effect: Effect::Trap { code: 1 },
+                    })
+                })?;
                 return Err(Edges::One(Edge {
                     state,
                     effect: Effect::Jump(target),
@@ -154,9 +172,18 @@ impl Arch for Mips32 {
                 assert_eq!(cx[cond].size(), B1);
 
                 // Process delay slot.
-                state = Self::lift_instr(cx, pc, state)
-                    .map_err(|edges| edges.map(|e, _| e.effect))
-                    .expect("mips: delay slots should be effect-less");
+                let delay_pc = *pc;
+                state = Self::lift_instr(cx, pc, state).map_err(|edges| {
+                    eprintln!(
+                        "mips: delay slot at {:?} had effect, emitting `Trap(1)`: {}",
+                        delay_pc,
+                        cx.pretty_print_on_edges(edges.as_ref().map(|e, _| &e.effect))
+                    );
+                    edges.map(|e, _| Edge {
+                        state: e.state,
+                        effect: Effect::Trap { code: 1 },
+                    })
+                })?;
                 return Err(Edges::Branch {
                     cond,
                     t: Edge { state: state.clone(), effect: Effect::Jump(t) },

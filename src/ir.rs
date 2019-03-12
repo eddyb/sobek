@@ -1135,9 +1135,15 @@ impl<P> Cx<P> {
         &'a self,
         value: &'a (impl Visit + fmt::Debug),
     ) -> impl fmt::Display + 'a {
-        self.pretty_print_on_edges(Edges::One((&self.default, value)))
+        self.pretty_print_on_edges(Edges::One(value))
     }
     pub fn pretty_print_on_edges<'a>(
+        &'a self,
+        edge_values: Edges<&'a (impl Visit + fmt::Debug)>,
+    ) -> impl fmt::Display + 'a {
+        self.pretty_print_with_states_on_edges(edge_values.map(|value, _| (&self.default, value)))
+    }
+    pub fn pretty_print_with_states_on_edges<'a>(
         &'a self,
         edge_states_and_values: Edges<(&'a State, &'a (impl Visit + fmt::Debug))>,
     ) -> impl fmt::Display + 'a {
