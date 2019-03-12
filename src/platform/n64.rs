@@ -3,23 +3,28 @@ use crate::ir::{BitSize, Const, MemSize, RawRom, Rom, SimplePlatform, Unsupporte
 
 pub struct Cartridge {
     pub raw: RawRom<Vec<u8>>,
+    pub base: Const,
 }
 
 impl Cartridge {
+    pub fn new(raw: RawRom<Vec<u8>>) -> Self {
+        let base = raw.load(Const::new(BitSize::B32, 8), MemSize::M32).unwrap();
+        Cartridge { raw, base }
+    }
+
     fn load_physical(&self, addr: Const, size: MemSize) -> Result<Const, UnsupportedAddress> {
+        // FIXME(eddyb) do this only once.
+        let (base_addr_space, base) = Mips32::decode_addr(self.base.as_u32());
+        assert_eq!(base_addr_space, AddrSpace::Direct { cached: true });
+
         match addr.as_u32() {
-            addr @ 0x0000_0400..=0x003f_ffff => self.raw.load(
-                Const::new(BitSize::B32, (0x1000 + (addr - 0x400)) as u64),
+            // TODO(eddyb) make sure this is actually correct now.
+            addr @ 0..=0x003f_ffff if addr >= base => self.raw.load(
+                Const::new(BitSize::B32, (0x1000 + (addr - base)) as u64),
                 size,
             ),
             _ => Err(UnsupportedAddress(addr)),
         }
-    }
-
-    pub fn entry_pc(&self) -> Const {
-        self.raw
-            .load(Const::new(BitSize::B32, 8), MemSize::M32)
-            .unwrap()
     }
 }
 

@@ -80,13 +80,11 @@ fn main() {
             );
         }
         "n64" => {
-            let rom = n64::Cartridge {
-                raw: RawRom {
-                    big_endian: true,
-                    data,
-                },
-            };
-            let entry_pc = rom.entry_pc();
+            let rom = n64::Cartridge::new(RawRom {
+                big_endian: true,
+                data,
+            });
+            let entry_pc = rom.base;
             analyze_and_dump(N64 { arch: Mips32, rom }, iter::once(entry_pc));
         }
         _ => panic!("unsupport arch {:?}", arch),

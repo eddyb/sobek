@@ -8,12 +8,14 @@ use std::iter;
 
 pub struct Mips32;
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
     Kernel,
     Supervisor,
     User,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum AddrSpace {
     Direct { cached: bool },
     Mapped(Mode),
