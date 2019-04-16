@@ -1,9 +1,9 @@
 // TODO(eddyb) use a better name for this module.
 
 use crate::ir::{
-    Arch,
     BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, IntOp, Mem, MemRef, MemSize, Platform, Rom, State, Use, Val,
+    Const, Cx, Edge, Edges, Effect, IntOp, Isa, Mem, MemRef, MemSize, Platform, Rom, State, Use,
+    Val,
 };
 use std::iter;
 
@@ -25,11 +25,11 @@ enum Reg {
 // FIXME(eddyb) don't make every SFR a register, if reads are not
 // "pure", e.g. they interact with I/O, they should use memory ops.
 
-impl Arch for _8051 {
+impl Isa for _8051 {
     // FIXME(eddyb) add proper support for a Harvard architecture.
     const ADDR_SIZE: BitSize = B16;
 
-    fn default_regs(cx: &mut Cx<impl Platform<Arch = Self>>) -> Vec<Use<Val>> {
+    fn default_regs(cx: &mut Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>> {
         (0..0x80)
             .map(|i| {
                 crate::ir::Reg {
@@ -64,7 +64,7 @@ impl Arch for _8051 {
     }
 
     fn lift_instr(
-        cx: &mut Cx<impl Platform<Arch = Self>>,
+        cx: &mut Cx<impl Platform<Isa = Self>>,
         pc: &mut Const,
         mut state: State,
     ) -> Result<State, Edges<Edge>> {

@@ -122,7 +122,7 @@ mod store {
                 default,
             };
 
-            cx.default.regs = P::Arch::default_regs(&mut cx);
+            cx.default.regs = P::Isa::default_regs(&mut cx);
 
             cx
         }
@@ -1004,14 +1004,14 @@ pub struct Block {
     pub edges: Edges<Edge>,
 }
 
-pub trait Arch: Sized {
+pub trait Isa: Sized {
     const ADDR_SIZE: BitSize;
 
-    fn default_regs(cx: &mut Cx<impl Platform<Arch = Self>>) -> Vec<Use<Val>>;
+    fn default_regs(cx: &mut Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>>;
 
     // FIXME(eddyb) replace the `Result` with a dedicated enum.
     fn lift_instr(
-        cx: &mut Cx<impl Platform<Arch = Self>>,
+        cx: &mut Cx<impl Platform<Isa = Self>>,
         pc: &mut Const,
         state: State,
     ) -> Result<State, Edges<Edge>>;
@@ -1089,24 +1089,24 @@ impl<T: Deref<Target = [u8]>> Rom for RawRom<T> {
 // FIXME(eddyb) maybe this and friends (e.g. `Rom`) shouldn't be here.
 // but `Cx<P>` requires `P: Platform`, so some reorganization is needed.
 pub trait Platform {
-    type Arch: Arch;
+    type Isa: Isa;
     type Rom: Rom;
 
-    fn arch(&self) -> &Self::Arch;
+    fn isa(&self) -> &Self::Isa;
     fn rom(&self) -> &Self::Rom;
 }
 
 pub struct SimplePlatform<A, R> {
-    pub arch: A,
+    pub isa: A,
     pub rom: R,
 }
 
-impl<A: Arch, R: Rom> Platform for SimplePlatform<A, R> {
-    type Arch = A;
+impl<A: Isa, R: Rom> Platform for SimplePlatform<A, R> {
+    type Isa = A;
     type Rom = R;
 
-    fn arch(&self) -> &Self::Arch {
-        &self.arch
+    fn isa(&self) -> &Self::Isa {
+        &self.isa
     }
     fn rom(&self) -> &Self::Rom {
         &self.rom
@@ -1383,7 +1383,7 @@ impl<P> Cx<P> {
             }
 
             // HACK(eddyb) try to guess the register name.
-            // Ideally this would be provided by the `Arch`.
+            // Ideally this would be provided by the `Isa`.
             let r = match self[default] {
                 Val::InReg(r) if i == r.index => r,
                 default => panic!("register #{} has non-register default {:?}", i, default),
@@ -1461,7 +1461,7 @@ impl<P> Cx<P> {
                                         let v = state.regs[i];
                                         if v != default && v != other_state.regs[i] {
                                             // HACK(eddyb) try to guess the register name.
-                                            // Ideally this would be provided by the `Arch`.
+                                            // Ideally this would be provided by the `Isa`.
                                             let r = match self.cx[default] {
                                                 Val::InReg(r) if i == r.index => r,
                                                 default => panic!(

@@ -1,9 +1,9 @@
 // TODO(eddyb) use a better name for this module.
 
 use crate::ir::{
-    Arch,
     BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, IntOp, Mem, MemRef, MemSize, Platform, Rom, State, Use, Val,
+    Const, Cx, Edge, Edges, Effect, IntOp, Isa, Mem, MemRef, MemSize, Platform, Rom, State, Use,
+    Val,
 };
 use std::iter;
 
@@ -33,10 +33,10 @@ pub enum Reg {
     F_C,
 }
 
-impl Arch for _8080 {
+impl Isa for _8080 {
     const ADDR_SIZE: BitSize = B16;
 
-    fn default_regs(cx: &mut Cx<impl Platform<Arch = Self>>) -> Vec<Use<Val>> {
+    fn default_regs(cx: &mut Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>> {
         ["a", "f", "b", "c", "d", "e", "h", "l"]
             .iter()
             .enumerate()
@@ -60,11 +60,11 @@ impl Arch for _8080 {
     }
 
     fn lift_instr(
-        cx: &mut Cx<impl Platform<Arch = Self>>,
+        cx: &mut Cx<impl Platform<Isa = Self>>,
         pc: &mut Const,
         mut state: State,
     ) -> Result<State, Edges<Edge>> {
-        let flavor = cx.platform.arch().flavor;
+        let flavor = cx.platform.isa().flavor;
 
         let add1 = |x| IntOp::Add.eval(x, Const::new(x.size, 1)).unwrap();
 

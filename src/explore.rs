@@ -1,5 +1,5 @@
 use crate::ir::{
-    Arch, BitSize, Block, Const, Cx, Edge, Edges, Effect, Mem, MemRef, MemSize, Platform, State,
+    BitSize, Block, Const, Cx, Edge, Edges, Effect, Isa, Mem, MemRef, MemSize, Platform, State,
     Use, Val, Visit, Visitor,
 };
 use std::collections::hash_map::Entry;
@@ -206,9 +206,9 @@ impl<'a, P: Platform> Explorer<'a, P> {
         // efficient check (`if let Some(x) = map.get(k) { return x; }`).
         if !self.blocks.contains_key(&bb) {
             let mut state = self.cx.default.clone();
-            let mut pc = Const::new(P::Arch::ADDR_SIZE, bb.entry_pc);
+            let mut pc = Const::new(P::Isa::ADDR_SIZE, bb.entry_pc);
             let edges = loop {
-                match P::Arch::lift_instr(self.cx, &mut pc, state) {
+                match P::Isa::lift_instr(self.cx, &mut pc, state) {
                     Ok(new_state) => state = new_state,
                     Err(edges) => break edges,
                 }

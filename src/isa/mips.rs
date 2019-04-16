@@ -1,8 +1,7 @@
 use crate::ir::{
-    Arch,
     BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, IntOp, Mem, MemRef, MemSize, Platform, Reg, Rom, State, Use,
-    Val,
+    Const, Cx, Edge, Edges, Effect, IntOp, Isa, Mem, MemRef, MemSize, Platform, Reg, Rom, State,
+    Use, Val,
 };
 use std::iter;
 
@@ -59,10 +58,10 @@ const REG_NAMES: [&str; 32] = [
     "ra",
 ];
 
-impl Arch for Mips32 {
+impl Isa for Mips32 {
     const ADDR_SIZE: BitSize = B32;
 
-    fn default_regs(cx: &mut Cx<impl Platform<Arch = Self>>) -> Vec<Use<Val>> {
+    fn default_regs(cx: &mut Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>> {
         iter::once(Val::Const(Const::new(B32, 0)))
             .chain((1..32).map(|i| {
                 Val::InReg(Reg {
@@ -83,7 +82,7 @@ impl Arch for Mips32 {
     }
 
     fn lift_instr(
-        cx: &mut Cx<impl Platform<Arch = Self>>,
+        cx: &mut Cx<impl Platform<Isa = Self>>,
         pc: &mut Const,
         mut state: State,
     ) -> Result<State, Edges<Edge>> {

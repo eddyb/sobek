@@ -1,8 +1,8 @@
-use sobek::arch::mips::Mips32;
-use sobek::arch::_8051::_8051;
-use sobek::arch::_8080::_8080;
 use sobek::explore::{BlockId, Explorer};
 use sobek::ir::{BitSize, Const, Cx, Platform, RawRom, SimplePlatform};
+use sobek::isa::mips::Mips32;
+use sobek::isa::_8051::_8051;
+use sobek::isa::_8080::_8080;
 use sobek::platform::n64::{self, N64};
 use std::iter;
 
@@ -33,14 +33,14 @@ fn analyze_and_dump<P: Platform>(platform: P, entries: impl Iterator<Item = Cons
 
 fn main() {
     // FIXME(eddyb) switch to `structopt`.
-    let arch = std::env::args().nth(1).unwrap();
+    let isa = std::env::args().nth(1).unwrap();
     let path = std::env::args().nth(2).unwrap();
     let data = std::fs::read(path).unwrap();
-    match &arch[..] {
+    match &isa[..] {
         "8051" => {
             analyze_and_dump(
                 SimplePlatform {
-                    arch: _8051,
+                    isa: _8051,
                     rom: RawRom {
                         big_endian: false,
                         data,
@@ -52,8 +52,8 @@ fn main() {
         "8080" => {
             analyze_and_dump(
                 SimplePlatform {
-                    arch: _8080 {
-                        flavor: sobek::arch::_8080::Flavor::Intel,
+                    isa: _8080 {
+                        flavor: sobek::isa::_8080::Flavor::Intel,
                     },
                     rom: RawRom {
                         big_endian: false,
@@ -66,8 +66,8 @@ fn main() {
         "gb" => {
             analyze_and_dump(
                 SimplePlatform {
-                    arch: _8080 {
-                        flavor: sobek::arch::_8080::Flavor::LR35902,
+                    isa: _8080 {
+                        flavor: sobek::isa::_8080::Flavor::LR35902,
                     },
                     rom: RawRom {
                         big_endian: false,
@@ -85,8 +85,8 @@ fn main() {
                 data,
             });
             let entry_pc = rom.base;
-            analyze_and_dump(N64 { arch: Mips32, rom }, iter::once(entry_pc));
+            analyze_and_dump(N64 { isa: Mips32, rom }, iter::once(entry_pc));
         }
-        _ => panic!("unsupport arch {:?}", arch),
+        _ => panic!("unsupport isa {:?}", isa),
     }
 }
