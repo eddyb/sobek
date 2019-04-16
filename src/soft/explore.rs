@@ -1,4 +1,4 @@
-use crate::ir::{
+use crate::soft::ir::{
     BitSize, Block, Const, Cx, Edge, Edges, Effect, Isa, Mem, MemRef, MemSize, Platform, State,
     Use, Val, Visit, Visitor,
 };

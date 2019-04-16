@@ -1,9 +1,9 @@
-use sobek::explore::{BlockId, Explorer};
-use sobek::ir::{BitSize, Const, Cx, Platform, RawRom, SimplePlatform};
-use sobek::isa::mips::Mips32;
-use sobek::isa::_8051::_8051;
-use sobek::isa::_8080::_8080;
-use sobek::platform::n64::{self, N64};
+use sobek::soft::explore::{BlockId, Explorer};
+use sobek::soft::ir::{BitSize, Const, Cx, Platform, RawRom, SimplePlatform};
+use sobek::soft::isa::mips::Mips32;
+use sobek::soft::isa::_8051::_8051;
+use sobek::soft::isa::_8080::_8080;
+use sobek::soft::platform::n64::{self, N64};
 use std::iter;
 
 fn analyze_and_dump<P: Platform>(platform: P, entries: impl Iterator<Item = Const>) {
@@ -53,7 +53,7 @@ fn main() {
             analyze_and_dump(
                 SimplePlatform {
                     isa: _8080 {
-                        flavor: sobek::isa::_8080::Flavor::Intel,
+                        flavor: sobek::soft::isa::_8080::Flavor::Intel,
                     },
                     rom: RawRom {
                         big_endian: false,
@@ -67,7 +67,7 @@ fn main() {
             analyze_and_dump(
                 SimplePlatform {
                     isa: _8080 {
-                        flavor: sobek::isa::_8080::Flavor::LR35902,
+                        flavor: sobek::soft::isa::_8080::Flavor::LR35902,
                     },
                     rom: RawRom {
                         big_endian: false,

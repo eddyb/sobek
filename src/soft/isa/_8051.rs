@@ -1,6 +1,6 @@
 // TODO(eddyb) use a better name for this module.
 
-use crate::ir::{
+use crate::soft::ir::{
     BitSize::{self, *},
     Const, Cx, Edge, Edges, Effect, IntOp, Isa, Mem, MemRef, MemSize, Platform, Rom, State, Use,
     Val,
@@ -32,7 +32,7 @@ impl Isa for _8051 {
     fn default_regs(cx: &mut Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>> {
         (0..0x80)
             .map(|i| {
-                crate::ir::Reg {
+                crate::soft::ir::Reg {
                     index: i,
                     size: B8,
                     name: if i == Reg::SP as usize {
@@ -54,7 +54,7 @@ impl Isa for _8051 {
                     },
                 }
             })
-            .chain(iter::once(crate::ir::Reg {
+            .chain(iter::once(crate::soft::ir::Reg {
                 index: Reg::PSW_C as usize,
                 size: B1,
                 name: "psw.c",
