@@ -107,6 +107,7 @@ impl Isa for Mips32 {
             (r(2), r(1), r(0))
         };
         let imm = Const::new(B32, instr as i16 as i32 as u32 as u64);
+        let uimm = Const::new(B32, instr as u16 as u64);
         // FIXME(eddyb) ensure more aggressively that this is always 0.
         let zero = state.regs[0];
 
@@ -304,6 +305,11 @@ impl Isa for Mips32 {
                         14 => IntOp::Xor,
 
                         _ => unreachable!(),
+                    };
+                    // HACK(eddyb) pick sign- or zero-extension based on op.
+                    let imm = match op {
+                        IntOp::And | IntOp::Or | IntOp::Xor => uimm,
+                        _ => imm,
                     };
 
                     let mut v = val!(Int(op, B32, rs, cx.a(imm)));
