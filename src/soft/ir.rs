@@ -664,6 +664,12 @@ impl Val {
                 }
             }
 
+            // HACK(eddyb) replace `x + a` with `a + x` where `x` is constant.
+            // See also the TODO below about sorting symmetric ops.
+            if op == IntOp::Add && c_a.is_some() && c_b.is_none() {
+                return Val::Int(IntOp::Add, size, b, a).normalize(cx);
+            }
+
             // HACK(eddyb) fuse `(a + x) + y` where `x` and `y` are constants.
             match (op, cx[a], cx[b]) {
                 (IntOp::Add, Val::Int(IntOp::Add, _, a, b), Val::Const(y)) => {
