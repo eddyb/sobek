@@ -1,6 +1,6 @@
 // TODO(eddyb) use a better name for this module.
 
-use crate::soft::ir::{
+use crate::ir::{
     BitSize::{self, *},
     Const, Cx, Edge, Edges, Effect, IntOp, Isa, Mem, MemRef, MemSize, Platform, Rom, State, Use,
     Val,
@@ -40,17 +40,17 @@ impl Isa for _8080 {
         ["a", "f", "b", "c", "d", "e", "h", "l"]
             .iter()
             .enumerate()
-            .map(|(i, name)| crate::soft::ir::Reg {
+            .map(|(i, name)| crate::ir::Reg {
                 index: i,
                 size: B8,
                 name,
             })
-            .chain(iter::once(crate::soft::ir::Reg {
+            .chain(iter::once(crate::ir::Reg {
                 index: Reg::SP as usize,
                 size: B16,
                 name: "sp",
             }))
-            .chain(iter::once(crate::soft::ir::Reg {
+            .chain(iter::once(crate::ir::Reg {
                 index: Reg::F_C as usize,
                 size: B1,
                 name: "f.c",
