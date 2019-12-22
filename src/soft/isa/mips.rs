@@ -243,8 +243,17 @@ impl Isa for Mips32 {
                 43 => val!(Zext(B32, val!(Int(IntOp::LtU, B32, rs, rt)))),
 
                 funct => {
-                    eprintln!("mips: SPECIAL/funct={} unknown", funct);
-                    return Ok(state);
+                    eprintln!(
+                        "mips: SPECIAL/funct={} unknown, emitting `PlatformCall(0)`",
+                        funct
+                    );
+                    return Err(Edges::One(Edge {
+                        state,
+                        effect: Effect::PlatformCall {
+                            code: 0,
+                            ret_pc: cx.a(*pc),
+                        },
+                    }));
                 }
             };
             state.set(rd, v);
@@ -255,8 +264,11 @@ impl Isa for Mips32 {
                 0 => branch!(val!(Int(IntOp::LtS, B32, rs, zero)) => true),
                 1 => branch!(val!(Int(IntOp::LtS, B32, rs, zero)) => false),
                 _ => {
-                    eprintln!("mips: REGIMM/rt={} unknown", rt);
-                    return Ok(state);
+                    eprintln!("mips: REGIMM/rt={} unknown, emitting `Trap(3)`", rt);
+                    return Err(Edges::One(Edge {
+                        state,
+                        effect: Effect::Trap { code: 3 },
+                    }));
                 }
             }
         } else if op == 2 || op == 3 {
@@ -273,6 +285,33 @@ impl Isa for Mips32 {
             // HACK(eddyb) this is done here to avoid const-folding
             // away control-flow in the general case.
             jump!(branch_target!());
+        } else if op == 16 || op == 17 || op == 18 {
+            // COPz.
+            let cp = op - 16;
+            let funct = field(0, 6);
+            if cp == 1 {
+                eprintln!(
+                    "mips: COP1 (FPU), rs={}, rt={}, rd={}, funct={} unknown, ignoring",
+                    rs, rt, rd, funct
+                );
+                return Ok(state);
+            }
+            eprintln!(
+                "mips: COP{}, rs={}, rt={}, rd={}, funct={} unknown, emitting `PlatformCall({:?})`",
+                cp,
+                rs,
+                rt,
+                rd,
+                funct,
+                Const::new(B32, instr as u64),
+            );
+            return Err(Edges::One(Edge {
+                state,
+                effect: Effect::PlatformCall {
+                    code: instr,
+                    ret_pc: cx.a(*pc),
+                },
+            }));
         } else {
             // I format.
             let rd = rt;
@@ -335,7 +374,16 @@ impl Isa for Mips32 {
                 55 => state.set(rd, val!(Trunc(B32, val!(Load(mem_ref!(M64)))))),
                 63 => state.mem = mem!(Store(mem_ref!(M64), val!(Zext(B64, rt)))),
 
-                _ => eprintln!("mips: op={} unknown", op),
+                _ => {
+                    eprintln!("mips: op={} unknown, emitting `PlatformCall(1)`", op);
+                    return Err(Edges::One(Edge {
+                        state,
+                        effect: Effect::PlatformCall {
+                            code: 1,
+                            ret_pc: cx.a(*pc),
+                        },
+                    }));
+                }
             }
         }
 

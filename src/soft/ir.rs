@@ -887,11 +887,14 @@ pub enum Effect {
 
 impl fmt::Debug for Effect {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
+        match *self {
             Effect::Jump(target) => write!(f, "Jump({:?})", target),
-            Effect::PlatformCall { code, ret_pc } => {
-                write!(f, "PlatformCall({}) -> {:?}", code, ret_pc)
-            }
+            Effect::PlatformCall { code, ret_pc } => write!(
+                f,
+                "PlatformCall({:?}) -> {:?}",
+                Const::new(BitSize::B32, code as u64),
+                ret_pc
+            ),
             Effect::Trap { code } => write!(f, "Trap({})", code),
         }
     }
@@ -900,10 +903,10 @@ impl fmt::Debug for Effect {
 impl Visit for Effect {
     fn walk(&self, visitor: &mut impl Visitor) {
         match *self {
-            Effect::Jump(target) => {
+            Effect::Jump(target) | Effect::PlatformCall { ret_pc: target, .. } => {
                 visitor.visit_val_use(target);
             }
-            Effect::PlatformCall { .. } | Effect::Trap { .. } => {}
+            Effect::Trap { .. } => {}
         }
     }
 }
