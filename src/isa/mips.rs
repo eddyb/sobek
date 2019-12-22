@@ -111,18 +111,15 @@ impl Isa for Mips32 {
         // FIXME(eddyb) ensure more aggressively that this is always 0.
         let zero = state.regs[0];
 
-        // HACK(eddyb) work around `cx.a(Val::Foo(cx.a(Val::Bar)))` not working.
         macro_rules! val {
-            ($name:ident($($arg:expr),*)) => {{
-                let x = Val::$name($($arg),*);
-                cx.a(x)
-            }}
+            ($name:ident($($arg:expr),*)) => {
+                cx.a(Val::$name($($arg),*))
+            }
         }
         macro_rules! mem {
-            ($name:ident($($arg:expr),*)) => {{
-                let x = Mem::$name($($arg),*);
-                cx.a(x)
-            }}
+            ($name:ident($($arg:expr),*)) => {
+                cx.a(Mem::$name($($arg),*))
+            }
         }
 
         macro_rules! link {

@@ -579,13 +579,19 @@ impl Val {
     pub fn bit_rol<P>(v: Use<Val>, n: Use<Val>) -> impl AllocIn<Cx<P>, Kind = Self> {
         move |cx: &Cx<P>| {
             let size = cx[v].size();
-            let bits = cx.a(Const::new(cx[n].size(), size.bits() as u64));
-            let bits_minus_n = cx.a(Val::int_sub(bits, n));
             Val::Int(
                 IntOp::Or,
                 size,
                 cx.a(Val::Int(IntOp::Shl, size, v, n)),
-                cx.a(Val::Int(IntOp::ShrU, size, v, bits_minus_n)),
+                cx.a(Val::Int(
+                    IntOp::ShrU,
+                    size,
+                    v,
+                    cx.a(Val::int_sub(
+                        cx.a(Const::new(cx[n].size(), size.bits() as u64)),
+                        n,
+                    )),
+                )),
             )
         }
     }
@@ -593,13 +599,19 @@ impl Val {
     pub fn bit_ror<P>(v: Use<Val>, n: Use<Val>) -> impl AllocIn<Cx<P>, Kind = Self> {
         move |cx: &Cx<P>| {
             let size = cx[v].size();
-            let bits = cx.a(Const::new(cx[n].size(), size.bits() as u64));
-            let bits_minus_n = cx.a(Val::int_sub(bits, n));
             Val::Int(
                 IntOp::Or,
                 size,
                 cx.a(Val::Int(IntOp::ShrU, size, v, n)),
-                cx.a(Val::Int(IntOp::Shl, size, v, bits_minus_n)),
+                cx.a(Val::Int(
+                    IntOp::Shl,
+                    size,
+                    v,
+                    cx.a(Val::int_sub(
+                        cx.a(Const::new(cx[n].size(), size.bits() as u64)),
+                        n,
+                    )),
+                )),
             )
         }
     }

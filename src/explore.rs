@@ -434,7 +434,8 @@ impl<'a, P: Platform> Explorer<'a, P> {
             // TODO(eddyb) how should fixpoint be detected?
             // Can't assume that a certain `targets` set is final,
             // as there could be outer cycles blocking progress.
-            let progress = |cx: &Cx<P>, old: Set1<Use<Val>>, new: Set1<Use<Val>>| match (old, new) {
+            let cx = self.cx;
+            let progress = |old: Set1<Use<Val>>, new: Set1<Use<Val>>| match (old, new) {
                 (Set1::One(old), Set1::One(new)) => {
                     if old != new {
                         println!(
@@ -451,8 +452,8 @@ impl<'a, P: Platform> Explorer<'a, P> {
                 (_, Set1::Empty) | (Set1::Many, _) => unreachable!(),
             };
             // Always check for progress, to ensure the sanity checks run.
-            let progress = progress(self.cx, old_targets, exit.targets)
-                | progress(self.cx, old_arg_values, exit.arg_values);
+            let progress =
+                progress(old_targets, exit.targets) | progress(old_arg_values, exit.arg_values);
             if old_observed && progress {
                 continue;
             }

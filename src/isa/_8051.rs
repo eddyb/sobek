@@ -83,18 +83,15 @@ impl Isa for _8051 {
 
         let op = imm!(8).as_u8();
 
-        // HACK(eddyb) work around `cx.a(Val::Foo(cx.a(Val::Bar)))` not working.
         macro_rules! val {
-            ($name:ident($($arg:expr),*)) => {{
-                let x = Val::$name($($arg),*);
-                cx.a(x)
-            }}
+            ($name:ident($($arg:expr),*)) => {
+                cx.a(Val::$name($($arg),*))
+            }
         }
         macro_rules! mem {
-            ($name:ident($($arg:expr),*)) => {{
-                let x = Mem::$name($($arg),*);
-                cx.a(x)
-            }}
+            ($name:ident($($arg:expr),*)) => {
+                cx.a(Mem::$name($($arg),*))
+            }
         }
         macro_rules! mem_ref {
             ($addr:expr, $sz:ident) => {{
