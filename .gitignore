@@ -1,3 +1,13 @@
 /target
 **/*.rs.bk
 Cargo.lock
+
+# ROMs.
+*.bin
+*.gb
+*.n64
+*.z64
+
+# Output files.
+# FIXME(eddyb) find a better format and/or get rid of this.
+*.log*.rs
