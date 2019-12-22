@@ -242,6 +242,18 @@ impl Isa for Mips32 {
                 42 => val!(Zext(B32, val!(Int(IntOp::LtS, B32, rs, rt)))),
                 43 => val!(Zext(B32, val!(Int(IntOp::LtU, B32, rs, rt)))),
 
+                // FIXME(eddyb) figure out if these are the correct semantics for the
+                // Doubleword R-format instructions in 32-bit mode on MIPS64.
+                63 => val!(Trunc(
+                    B32,
+                    val!(Int(
+                        IntOp::ShrU,
+                        B64,
+                        val!(Zext(B64, rt)),
+                        cx.a(Const::new(B32, sa as u64 + 32))
+                    ))
+                )),
+
                 funct => {
                     eprintln!(
                         "mips: SPECIAL/funct={} unknown, emitting `PlatformCall(0)`",
