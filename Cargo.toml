@@ -9,7 +9,6 @@ description = "Reverse engineering framework."
 
 [dependencies]
 scoped-tls = "0.1.2"
-slotmap = "0.3.0"
 
 [lib]
 doctest = false

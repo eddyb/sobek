@@ -13,10 +13,11 @@ mod store {
     use std::cmp::Ordering;
     use std::collections::hash_map::Entry;
     use std::collections::HashMap;
+    use std::convert::TryInto;
     use std::hash::{Hash, Hasher};
 
     pub struct Use<T> {
-        key: slotmap::KeyData,
+        idx: u32,
         _marker: PhantomData<T>,
     }
 
@@ -30,44 +31,27 @@ mod store {
 
     impl<T> PartialEq for Use<T> {
         fn eq(&self, other: &Self) -> bool {
-            self.key == other.key
+            self.idx == other.idx
         }
     }
     impl<T> Eq for Use<T> {}
 
     impl<T> PartialOrd for Use<T> {
         fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            self.key.partial_cmp(&other.key)
+            self.idx.partial_cmp(&other.idx)
         }
     }
     impl<T> Ord for Use<T> {
         fn cmp(&self, other: &Self) -> Ordering {
-            self.key.cmp(&other.key)
+            self.idx.cmp(&other.idx)
         }
     }
 
     impl<T> Hash for Use<T> {
         fn hash<H: Hasher>(&self, state: &mut H) {
-            self.key.hash(state);
+            self.idx.hash(state);
         }
     }
-
-    impl<T> From<slotmap::KeyData> for Use<T> {
-        fn from(key: slotmap::KeyData) -> Self {
-            Use {
-                key,
-                _marker: PhantomData,
-            }
-        }
-    }
-
-    impl<T> From<Use<T>> for slotmap::KeyData {
-        fn from(u: Use<T>) -> Self {
-            u.key
-        }
-    }
-
-    impl<T> slotmap::Key for Use<T> {}
 
     #[derive(Default)]
     pub struct PerKind<Val, Mem> {
@@ -75,26 +59,26 @@ mod store {
         pub mem: Mem,
     }
 
-    pub struct Store<T: slotmap::Slottable> {
-        slots: slotmap::SlotMap<Use<T>, T>,
+    pub struct Store<T> {
         map: HashMap<T, Use<T>>,
+        vec: Vec<T>,
     }
 
     pub(super) type Stores = PerKind<Store<Val>, Store<Mem>>;
 
-    impl<T: slotmap::Slottable + Eq + Hash> Default for Store<T> {
+    impl<T: Eq + Hash> Default for Store<T> {
         fn default() -> Self {
             Store {
-                slots: Default::default(),
                 map: Default::default(),
+                vec: Default::default(),
             }
         }
     }
 
-    impl<T: slotmap::Slottable> Index<Use<T>> for Store<T> {
+    impl<T> Index<Use<T>> for Store<T> {
         type Output = T;
         fn index(&self, u: Use<T>) -> &T {
-            &self.slots[u]
+            &self.vec[u.idx as usize]
         }
     }
 
@@ -102,7 +86,14 @@ mod store {
         fn alloc(&mut self, x: T) -> Use<T> {
             match self.map.entry(x) {
                 Entry::Occupied(entry) => *entry.get(),
-                Entry::Vacant(entry) => *entry.insert(self.slots.insert(x)),
+                Entry::Vacant(entry) => {
+                    let next = self.vec.len().try_into().unwrap();
+                    self.vec.push(x);
+                    *entry.insert(Use {
+                        idx: next,
+                        _marker: PhantomData,
+                    })
+                }
             }
         }
     }
@@ -178,11 +169,7 @@ mod store {
                     match local {
                         Some(Ok(i)) => write!(f, concat!($prefix, "{}"), i),
                         Some(Err(x)) => write!(f, "{:?}", x),
-                        None => {
-                            let k = self.key.as_ffi();
-                            let (hi, lo) = ((k >> 32) as u32, k as u32);
-                            write!(f, concat!($prefix, "#{:x}:{:x}"), hi, lo)
-                        }
+                        None => write!(f, concat!($prefix, "#{:x}"), self.idx),
                     }
                 }
             }
