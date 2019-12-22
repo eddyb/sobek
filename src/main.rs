@@ -7,8 +7,8 @@ use sobek::platform::n64::{self, N64};
 use std::iter;
 
 fn analyze_and_dump<P: Platform>(platform: P, entries: impl Iterator<Item = Const>) {
-    let mut cx = Cx::new(platform);
-    let mut explorer = Explorer::new(&mut cx);
+    let cx = Cx::new(platform);
+    let mut explorer = Explorer::new(&cx);
     for entry_pc in entries {
         explorer.explore_bbs(entry_pc);
     }

@@ -10,6 +10,8 @@ pub use self::store::*;
 mod store {
     use super::*;
 
+    use elsa::FrozenVec;
+    use std::cell::RefCell;
     use std::cmp::Ordering;
     use std::collections::hash_map::Entry;
     use std::collections::HashMap;
@@ -60,8 +62,9 @@ mod store {
     }
 
     pub struct Store<T> {
-        map: HashMap<T, Use<T>>,
-        vec: Vec<T>,
+        // FIXME(Manishearth/elsa#6) switch to `FrozenIndexSet` when available.
+        map: RefCell<HashMap<T, Use<T>>>,
+        vec: FrozenVec<Box<T>>,
     }
 
     pub(super) type Stores = PerKind<Store<Val>, Store<Mem>>;
@@ -83,12 +86,12 @@ mod store {
     }
 
     impl<T: Copy + Eq + Hash> Store<T> {
-        fn alloc(&mut self, x: T) -> Use<T> {
-            match self.map.entry(x) {
+        fn alloc(&self, x: T) -> Use<T> {
+            match self.map.borrow_mut().entry(x) {
                 Entry::Occupied(entry) => *entry.get(),
                 Entry::Vacant(entry) => {
                     let next = self.vec.len().try_into().unwrap();
-                    self.vec.push(x);
+                    self.vec.push(Box::new(x));
                     *entry.insert(Use {
                         idx: next,
                         _marker: PhantomData,
@@ -100,7 +103,7 @@ mod store {
 
     impl<P: Platform> Cx<P> {
         pub fn new(platform: P) -> Self {
-            let mut stores = Stores::default();
+            let stores = Stores::default();
 
             let default = State {
                 mem: stores.mem.alloc(Mem::In),
@@ -113,7 +116,7 @@ mod store {
                 default,
             };
 
-            cx.default.regs = P::Isa::default_regs(&mut cx);
+            cx.default.regs = P::Isa::default_regs(&cx);
 
             cx
         }
@@ -121,18 +124,19 @@ mod store {
 
     pub trait AllocIn<C>: Sized {
         type Kind;
-        fn alloc_in(self, cx: &mut C) -> Use<Self::Kind>;
+        fn alloc_in(self, cx: &C) -> Use<Self::Kind>;
     }
 
-    impl<C, K: AllocIn<C, Kind = K>, F: FnOnce(&mut C) -> K> AllocIn<C> for F {
+    // FIXME(eddyb) is this sort of thing even needed anymore?
+    impl<C, K: AllocIn<C, Kind = K>, F: FnOnce(&C) -> K> AllocIn<C> for F {
         type Kind = K;
-        fn alloc_in(self, cx: &mut C) -> Use<K> {
+        fn alloc_in(self, cx: &C) -> Use<K> {
             self(cx).alloc_in(cx)
         }
     }
 
     impl<P> Cx<P> {
-        pub fn a<T: AllocIn<Self>>(&mut self, x: T) -> Use<T::Kind> {
+        pub fn a<T: AllocIn<Self>>(&self, x: T) -> Use<T::Kind> {
             x.alloc_in(self)
         }
     }
@@ -151,7 +155,7 @@ mod store {
 
             impl<P> AllocIn<Cx<P>> for $k {
                 type Kind = Self;
-                fn alloc_in(self, cx: &mut Cx<P>) -> Use<Self> {
+                fn alloc_in(self, cx: &Cx<P>) -> Use<Self> {
                     match self.normalize(cx) {
                         Ok(x) => cx.stores.$field.alloc(x),
                         Err(u) => u,
@@ -244,7 +248,7 @@ impl fmt::Debug for Const {
 
 impl<P> AllocIn<Cx<P>> for Const {
     type Kind = Val;
-    fn alloc_in(self, cx: &mut Cx<P>) -> Use<Val> {
+    fn alloc_in(self, cx: &Cx<P>) -> Use<Val> {
         cx.a(Val::Const(self))
     }
 }
@@ -513,7 +517,7 @@ impl fmt::Debug for MemRef {
 }
 
 impl MemRef {
-    pub fn subst<P>(self, cx: &mut Cx<P>, base: &State) -> Self {
+    pub fn subst<P>(self, cx: &Cx<P>, base: &State) -> Self {
         MemRef {
             mem: self.mem.subst(cx, base),
             addr: self.addr.subst(cx, base),
@@ -550,29 +554,30 @@ impl fmt::Debug for Val {
 }
 
 impl Val {
+    // FIXME(eddyb) should these take `&Cx<P>` instead?
     pub fn int_neg<P>(v: Use<Val>) -> impl AllocIn<Cx<P>, Kind = Self> {
-        move |cx: &mut Cx<P>| {
+        move |cx: &Cx<P>| {
             let size = cx[v].size();
             Val::Int(IntOp::MulS, size, v, cx.a(Const::new(size, size.mask())))
         }
     }
 
     pub fn int_sub<P>(a: Use<Val>, b: Use<Val>) -> impl AllocIn<Cx<P>, Kind = Self> {
-        move |cx: &mut Cx<P>| {
+        move |cx: &Cx<P>| {
             let size = cx[a].size();
             Val::Int(IntOp::Add, size, a, cx.a(Val::int_neg(b)))
         }
     }
 
     pub fn bit_not<P>(v: Use<Val>) -> impl AllocIn<Cx<P>, Kind = Self> {
-        move |cx: &mut Cx<P>| {
+        move |cx: &Cx<P>| {
             let size = cx[v].size();
             Val::Int(IntOp::Xor, size, v, cx.a(Const::new(size, size.mask())))
         }
     }
 
     pub fn bit_rol<P>(v: Use<Val>, n: Use<Val>) -> impl AllocIn<Cx<P>, Kind = Self> {
-        move |cx: &mut Cx<P>| {
+        move |cx: &Cx<P>| {
             let size = cx[v].size();
             let bits = cx.a(Const::new(cx[n].size(), size.bits() as u64));
             let bits_minus_n = cx.a(Val::int_sub(bits, n));
@@ -586,7 +591,7 @@ impl Val {
     }
 
     pub fn bit_ror<P>(v: Use<Val>, n: Use<Val>) -> impl AllocIn<Cx<P>, Kind = Self> {
-        move |cx: &mut Cx<P>| {
+        move |cx: &Cx<P>| {
             let size = cx[v].size();
             let bits = cx.a(Const::new(cx[n].size(), size.bits() as u64));
             let bits_minus_n = cx.a(Val::int_sub(bits, n));
@@ -623,7 +628,7 @@ impl Val {
         }
     }
 
-    fn normalize<P>(mut self, cx: &mut Cx<P>) -> Result<Self, Use<Self>> {
+    fn normalize<P>(mut self, cx: &Cx<P>) -> Result<Self, Use<Self>> {
         // TODO(eddyb) resolve loads.
 
         if let Val::Const(c) = self {
@@ -778,7 +783,7 @@ impl Visit for Val {
 }
 
 impl Use<Val> {
-    pub fn subst<P>(self, cx: &mut Cx<P>, base: &State) -> Self {
+    pub fn subst<P>(self, cx: &Cx<P>, base: &State) -> Self {
         let v = match cx[self] {
             Val::InReg(r) => return base.regs[r.index],
 
@@ -818,7 +823,7 @@ impl fmt::Debug for Mem {
 }
 
 impl Mem {
-    fn normalize<P>(self, cx: &mut Cx<P>) -> Result<Self, Use<Self>> {
+    fn normalize<P>(self, cx: &Cx<P>) -> Result<Self, Use<Self>> {
         if let Mem::Store(r, v) = self {
             let r_size: BitSize = r.size.into();
             assert_eq!(r_size, cx[v].size());
@@ -855,7 +860,7 @@ impl Visit for Mem {
 }
 
 impl Use<Mem> {
-    pub fn subst<P>(self, cx: &mut Cx<P>, base: &State) -> Self {
+    pub fn subst<P>(self, cx: &Cx<P>, base: &State) -> Self {
         let m = match cx[self] {
             Mem::In => return base.mem,
 
@@ -1003,11 +1008,11 @@ pub struct Block {
 pub trait Isa: Sized {
     const ADDR_SIZE: BitSize;
 
-    fn default_regs(cx: &mut Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>>;
+    fn default_regs(cx: &Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>>;
 
     // FIXME(eddyb) replace the `Result` with a dedicated enum.
     fn lift_instr(
-        cx: &mut Cx<impl Platform<Isa = Self>>,
+        cx: &Cx<impl Platform<Isa = Self>>,
         pc: &mut Const,
         state: State,
     ) -> Result<State, Edges<Edge>>;

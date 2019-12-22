@@ -36,7 +36,7 @@ pub enum Reg {
 impl Isa for _8080 {
     const ADDR_SIZE: BitSize = B16;
 
-    fn default_regs(cx: &mut Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>> {
+    fn default_regs(cx: &Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>> {
         ["a", "f", "b", "c", "d", "e", "h", "l"]
             .iter()
             .enumerate()
@@ -60,7 +60,7 @@ impl Isa for _8080 {
     }
 
     fn lift_instr(
-        cx: &mut Cx<impl Platform<Isa = Self>>,
+        cx: &Cx<impl Platform<Isa = Self>>,
         pc: &mut Const,
         mut state: State,
     ) -> Result<State, Edges<Edge>> {

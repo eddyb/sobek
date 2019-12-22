@@ -61,7 +61,7 @@ const REG_NAMES: [&str; 32] = [
 impl Isa for Mips32 {
     const ADDR_SIZE: BitSize = B32;
 
-    fn default_regs(cx: &mut Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>> {
+    fn default_regs(cx: &Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>> {
         iter::once(Val::Const(Const::new(B32, 0)))
             .chain((1..32).map(|i| {
                 Val::InReg(Reg {
@@ -82,7 +82,7 @@ impl Isa for Mips32 {
     }
 
     fn lift_instr(
-        cx: &mut Cx<impl Platform<Isa = Self>>,
+        cx: &Cx<impl Platform<Isa = Self>>,
         pc: &mut Const,
         mut state: State,
     ) -> Result<State, Edges<Edge>> {

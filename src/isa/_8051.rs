@@ -29,7 +29,7 @@ impl Isa for _8051 {
     // FIXME(eddyb) add proper support for a Harvard architecture.
     const ADDR_SIZE: BitSize = B16;
 
-    fn default_regs(cx: &mut Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>> {
+    fn default_regs(cx: &Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>> {
         (0..0x80)
             .map(|i| {
                 crate::ir::Reg {
@@ -64,7 +64,7 @@ impl Isa for _8051 {
     }
 
     fn lift_instr(
-        cx: &mut Cx<impl Platform<Isa = Self>>,
+        cx: &Cx<impl Platform<Isa = Self>>,
         pc: &mut Const,
         mut state: State,
     ) -> Result<State, Edges<Edge>> {

@@ -80,7 +80,7 @@ impl Use<Mem> {
     // HACK(eddyb) try to get the last stored value.
     fn subst_reduce_load<P>(
         self,
-        cx: &mut Cx<P>,
+        cx: &Cx<P>,
         base: Option<&State>,
         addr: Use<Val>,
         size: MemSize,
@@ -108,7 +108,7 @@ impl Use<Mem> {
 
 // FIXME(eddyb) introduce a more general "folder" abstraction.
 impl Use<Val> {
-    fn subst_reduce<P>(self, cx: &mut Cx<P>, base: Option<&State>) -> Self {
+    fn subst_reduce<P>(self, cx: &Cx<P>, base: Option<&State>) -> Self {
         let v = match cx[self] {
             Val::InReg(r) => return base.map_or(self, |base| base.regs[r.index]),
 
@@ -172,7 +172,7 @@ impl Exit {
         }
     }
 
-    fn subst<P>(self, cx: &mut Cx<P>, base: &State) -> Self {
+    fn subst<P>(self, cx: &Cx<P>, base: &State) -> Self {
         Exit {
             targets: self
                 .targets
@@ -186,14 +186,14 @@ impl Exit {
 }
 
 pub struct Explorer<'a, P> {
-    pub cx: &'a mut Cx<P>,
+    pub cx: &'a Cx<P>,
     pub blocks: BTreeMap<BlockId, Block>,
 
     exit_cache: HashMap<(BlockId, ExitOptions), Exit>,
 }
 
 impl<'a, P: Platform> Explorer<'a, P> {
-    pub fn new(cx: &'a mut Cx<P>) -> Self {
+    pub fn new(cx: &'a Cx<P>) -> Self {
         Explorer {
             cx,
             blocks: BTreeMap::new(),
@@ -434,23 +434,22 @@ impl<'a, P: Platform> Explorer<'a, P> {
             // TODO(eddyb) how should fixpoint be detected?
             // Can't assume that a certain `targets` set is final,
             // as there could be outer cycles blocking progress.
-            let progress =
-                |cx: &mut Cx<P>, old: Set1<Use<Val>>, new: Set1<Use<Val>>| match (old, new) {
-                    (Set1::One(old), Set1::One(new)) => {
-                        if old != new {
-                            println!(
-                                "explore: {:?} changed a value from {} to {}",
-                                bb,
-                                cx.pretty_print(&old),
-                                cx.pretty_print(&new)
-                            )
-                        }
-                        false
+            let progress = |cx: &Cx<P>, old: Set1<Use<Val>>, new: Set1<Use<Val>>| match (old, new) {
+                (Set1::One(old), Set1::One(new)) => {
+                    if old != new {
+                        println!(
+                            "explore: {:?} changed a value from {} to {}",
+                            bb,
+                            cx.pretty_print(&old),
+                            cx.pretty_print(&new)
+                        )
                     }
-                    (Set1::Empty, Set1::Empty) | (Set1::Many, Set1::Many) => false,
-                    (Set1::Empty, _) | (_, Set1::Many) => true,
-                    (_, Set1::Empty) | (Set1::Many, _) => unreachable!(),
-                };
+                    false
+                }
+                (Set1::Empty, Set1::Empty) | (Set1::Many, Set1::Many) => false,
+                (Set1::Empty, _) | (_, Set1::Many) => true,
+                (_, Set1::Empty) | (Set1::Many, _) => unreachable!(),
+            };
             // Always check for progress, to ensure the sanity checks run.
             let progress = progress(self.cx, old_targets, exit.targets)
                 | progress(self.cx, old_arg_values, exit.arg_values);
