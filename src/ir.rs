@@ -209,6 +209,16 @@ impl BitSize {
         }
     }
 
+    pub fn bits_subscript(self) -> &'static str {
+        match self {
+            BitSize::B1 => "₁",
+            BitSize::B8 => "₈",
+            BitSize::B16 => "₁₆",
+            BitSize::B32 => "₃₂",
+            BitSize::B64 => "₆₄",
+        }
+    }
+
     fn mask(self) -> u64 {
         !0 >> (64 - self.bits())
     }
@@ -501,6 +511,15 @@ impl MemSize {
             MemSize::M64 => 64,
         }
     }
+
+    pub fn bits_subscript(self) -> &'static str {
+        match self {
+            MemSize::M8 => "₈",
+            MemSize::M16 => "₁₆",
+            MemSize::M32 => "₃₂",
+            MemSize::M64 => "₆₄",
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
@@ -512,7 +531,13 @@ pub struct MemRef {
 
 impl fmt::Debug for MemRef {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}.{}[{:?}]", self.mem, self.size.bits(), self.addr)
+        write!(
+            f,
+            "{:?}[{:?}]{}",
+            self.mem,
+            self.addr,
+            self.size.bits_subscript()
+        )
     }
 }
 
@@ -544,11 +569,19 @@ impl fmt::Debug for Val {
         match self {
             Val::InReg(r) => write!(f, "in.{:?}", r),
             Val::Const(c) => c.fmt(f),
-            Val::Int(op, size, a, b) => write!(f, "{:?}.{}({:?}, {:?})", op, size.bits(), a, b),
-            Val::Trunc(size, x) => write!(f, "Trunc.{}({:?})", size.bits(), x),
-            Val::Sext(size, x) => write!(f, "Sext.{}({:?})", size.bits(), x),
-            Val::Zext(size, x) => write!(f, "Zext.{}({:?})", size.bits(), x),
-            Val::Load(r) => write!(f, "{:?}.Load.{}({:?})", r.mem, r.size.bits(), r.addr),
+            Val::Int(op, size, a, b) => {
+                write!(f, "{:?}{}({:?}, {:?})", op, size.bits_subscript(), a, b)
+            }
+            Val::Trunc(size, x) => write!(f, "Trunc{}({:?})", size.bits_subscript(), x),
+            Val::Sext(size, x) => write!(f, "Sext{}({:?})", size.bits_subscript(), x),
+            Val::Zext(size, x) => write!(f, "Zext{}({:?})", size.bits_subscript(), x),
+            Val::Load(r) => write!(
+                f,
+                "{:?}.Load{}({:?})",
+                r.mem,
+                r.size.bits_subscript(),
+                r.addr
+            ),
         }
     }
 }
@@ -824,9 +857,9 @@ impl fmt::Debug for Mem {
             Mem::In => write!(f, "in.m"),
             Mem::Store(r, x) => write!(
                 f,
-                "{:?}.Store.{}({:?}, {:?})",
+                "{:?}.Store{}({:?}, {:?})",
                 r.mem,
-                r.size.bits(),
+                r.size.bits_subscript(),
                 r.addr,
                 x
             ),
