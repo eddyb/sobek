@@ -1,6 +1,6 @@
 use crate::ir::{
-    BitSize, Block, Const, Cx, Edge, Edges, Effect, Isa, Mem, MemRef, MemSize, Platform, State,
-    Use, Val, Visit, Visitor,
+    BitSize, Block, Const, Cx, Edge, Edges, Effect, Isa, Mem, MemRef, MemSize, Platform, Rom,
+    State, Use, Val, Visit, Visitor,
 };
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
@@ -78,7 +78,7 @@ impl From<Const> for BlockId {
 
 impl Use<Mem> {
     // HACK(eddyb) try to get the last stored value.
-    fn subst_reduce_load<P>(
+    fn subst_reduce_load<P: Platform>(
         self,
         cx: &Cx<P>,
         base: Option<&State>,
@@ -88,11 +88,20 @@ impl Use<Mem> {
         match cx[self] {
             Mem::In => match base {
                 Some(base) => base.mem.subst_reduce_load(cx, None, addr, size),
-                None => cx.a(Val::Load(MemRef {
-                    mem: self,
-                    addr,
-                    size,
-                })),
+                None => {
+                    // HACK(eddyb) assume it's from the ROM, if in range of it.
+                    if let Some(addr) = cx[addr].as_const() {
+                        if let Ok(v) = cx.platform.rom().load(addr, size) {
+                            return cx.a(v);
+                        }
+                    }
+
+                    cx.a(Val::Load(MemRef {
+                        mem: self,
+                        addr,
+                        size,
+                    }))
+                }
             },
 
             Mem::Store(r, v) => {
@@ -108,7 +117,7 @@ impl Use<Mem> {
 
 // FIXME(eddyb) introduce a more general "folder" abstraction.
 impl Use<Val> {
-    fn subst_reduce<P>(self, cx: &Cx<P>, base: Option<&State>) -> Self {
+    fn subst_reduce<P: Platform>(self, cx: &Cx<P>, base: Option<&State>) -> Self {
         let v = match cx[self] {
             Val::InReg(r) => return base.map_or(self, |base| base.regs[r.index]),
 
@@ -172,7 +181,7 @@ impl Exit {
         }
     }
 
-    fn subst<P>(self, cx: &Cx<P>, base: &State) -> Self {
+    fn subst<P: Platform>(self, cx: &Cx<P>, base: &State) -> Self {
         Exit {
             targets: self
                 .targets
@@ -328,7 +337,8 @@ impl<'a, P: Platform> Explorer<'a, P> {
                             }
                         }
 
-                        panic!(
+                        // FIXME(eddyb) continuing after this point is probably wrong.
+                        println!(
                             "explore: {:?} -> {:?} reaches {:?}/{} and then also {:?}/{}",
                             bb,
                             direct_target_bb,
