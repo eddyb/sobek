@@ -588,6 +588,27 @@ impl fmt::Debug for Val {
             Val::InReg(r) => write!(f, "in.{:?}", r),
             Val::Const(c) => c.fmt(f),
             Val::Int(op, size, a, b) => {
+                let get_inline_val = |v: Use<Val>| {
+                    if DBG_LOCALS.is_set() {
+                        DBG_LOCALS.with(|maps| maps.val.get(&v)?.err())
+                    } else {
+                        None
+                    }
+                };
+                let as_unop = |v: Val| v.as_unop(|c| get_inline_val(c)?.as_const());
+
+                // `-x` and `!x`.
+                if let Some((unary_op, x)) = as_unop(*self) {
+                    return write!(f, "{}{:?}", unary_op, x);
+                }
+
+                // `a - b`.
+                if let IntOp::Add = op {
+                    if let Some(('-', b)) = get_inline_val(*b).and_then(as_unop) {
+                        return write!(f, "{:?} -{} {:?}", a, size.bits_subscript(), b);
+                    }
+                }
+
                 write!(
                     f,
                     "{:?} {}{} {:?}",
@@ -696,6 +717,28 @@ impl Val {
             Val::Const(x) => Some(x),
             _ => None,
         }
+    }
+
+    /// Returns `Some(('-', x))` for `x * -1`, and `Some(('!', x))` for `x ^ !0`.
+    /// Note that `-1` and `!0` are the same all-ones bitpattern.
+    fn as_unop(
+        &self,
+        get_const: impl FnOnce(Use<Val>) -> Option<Const>,
+    ) -> Option<(char, Use<Val>)> {
+        if let Val::Int(op, size, a, b) = *self {
+            if let IntOp::Mul | IntOp::Xor = op {
+                let all_ones = Const::new(size, size.mask());
+                if get_const(b) == Some(all_ones) {
+                    let unary_op = match op {
+                        IntOp::Mul => '-',
+                        IntOp::Xor => '!',
+                        _ => unreachable!(),
+                    };
+                    return Some((unary_op, a));
+                }
+            }
+        }
+        None
     }
 
     fn normalize<P>(mut self, cx: &Cx<P>) -> Result<Self, Use<Self>> {
@@ -1282,6 +1325,10 @@ impl<P> Cx<P> {
                 let val = self.cx[v];
                 let inline = match val {
                     Val::InReg(_) | Val::Const(_) => true,
+
+                    // `-x` and `!x`.
+                    _ if val.as_unop(|c| self.cx[c].as_const()).is_some() => true,
+
                     _ => allowed_inline && self.data.use_counts.val[&v] == 1,
                 };
                 let local = if inline {
