@@ -339,6 +339,29 @@ pub enum IntOp {
 }
 
 impl IntOp {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IntOp::Add => "+",
+            IntOp::Mul => "*",
+            IntOp::DivS => "/ₛ",
+            IntOp::DivU => "/ᵤ",
+            IntOp::RemS => "%ₛ",
+            IntOp::RemU => "%ᵤ",
+
+            IntOp::Eq => "==",
+            IntOp::LtS => "<ₛ",
+            IntOp::LtU => "<ᵤ",
+
+            IntOp::And => "&",
+            IntOp::Or => "|",
+            IntOp::Xor => "^",
+
+            IntOp::Shl => "<<",
+            IntOp::ShrS => ">>ₛ",
+            IntOp::ShrU => ">>ᵤ",
+        }
+    }
+
     pub fn eval(self, a: Const, b: Const) -> Option<Const> {
         let size = match self {
             IntOp::Eq | IntOp::LtS | IntOp::LtU => BitSize::B1,
@@ -565,14 +588,21 @@ impl fmt::Debug for Val {
             Val::InReg(r) => write!(f, "in.{:?}", r),
             Val::Const(c) => c.fmt(f),
             Val::Int(op, size, a, b) => {
-                write!(f, "{:?}{}({:?}, {:?})", op, size.bits_subscript(), a, b)
+                write!(
+                    f,
+                    "{:?} {}{} {:?}",
+                    a,
+                    op.as_str(),
+                    size.bits_subscript(),
+                    b
+                )
             }
-            Val::Trunc(size, x) => write!(f, "Trunc{}({:?})", size.bits_subscript(), x),
-            Val::Sext(size, x) => write!(f, "Sext{}({:?})", size.bits_subscript(), x),
-            Val::Zext(size, x) => write!(f, "Zext{}({:?})", size.bits_subscript(), x),
+            Val::Trunc(size, x) => write!(f, "trunc{}({:?})", size.bits_subscript(), x),
+            Val::Sext(size, x) => write!(f, "sext{}({:?})", size.bits_subscript(), x),
+            Val::Zext(size, x) => write!(f, "zext{}({:?})", size.bits_subscript(), x),
             Val::Load(r) => write!(
                 f,
-                "{:?}.Load{}({:?})",
+                "{:?}.load{}({:?})",
                 r.mem,
                 r.size.bits_subscript(),
                 r.addr
@@ -852,7 +882,7 @@ impl fmt::Debug for Mem {
             Mem::In => write!(f, "in.m"),
             Mem::Store(r, x) => write!(
                 f,
-                "{:?}.Store{}({:?}, {:?})",
+                "{:?}.store{}({:?}, {:?})",
                 r.mem,
                 r.size.bits_subscript(),
                 r.addr,
@@ -920,14 +950,14 @@ pub enum Effect {
 impl fmt::Debug for Effect {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            Effect::Jump(target) => write!(f, "Jump({:?})", target),
+            Effect::Jump(target) => write!(f, "jump({:?})", target),
             Effect::PlatformCall { code, ret_pc } => write!(
                 f,
-                "PlatformCall({:?}) -> {:?}",
+                "platform_call({:?}) -> {:?}",
                 Const::new(BitSize::B32, code as u64),
                 ret_pc
             ),
-            Effect::Trap { code } => write!(f, "Trap({})", code),
+            Effect::Trap { code } => write!(f, "trap({})", code),
         }
     }
 }
