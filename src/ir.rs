@@ -786,6 +786,11 @@ impl Val {
                 }
                 _ => {}
             }
+
+            // Simplify `x ^ x` to `0`.
+            if op == IntOp::Xor && a == b {
+                return Ok(Val::Const(Const::new(size, 0)));
+            }
         }
 
         // FIXME(eddyb) deduplicate these
