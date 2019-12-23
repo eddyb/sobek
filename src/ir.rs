@@ -319,8 +319,7 @@ impl Const {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum IntOp {
     Add,
-    MulS,
-    MulU,
+    Mul,
     DivS,
     DivU,
     RemS,
@@ -350,7 +349,7 @@ impl IntOp {
             _ => false,
         };
         let is_signed = match self {
-            IntOp::MulS | IntOp::DivS | IntOp::RemS | IntOp::LtS | IntOp::ShrS => true,
+            IntOp::DivS | IntOp::RemS | IntOp::LtS | IntOp::ShrS => true,
             _ => false,
         };
         if !is_shift {
@@ -369,8 +368,7 @@ impl IntOp {
 
         let r = match self {
             IntOp::Add => a.wrapping_add(b),
-            IntOp::MulS => (a as i64 as i128 * b as i64 as i128) as u64,
-            IntOp::MulU => (a as u128 * b as u128) as u64,
+            IntOp::Mul => a.wrapping_mul(b),
             IntOp::DivS => (a as i64).checked_div(b as i64)? as u64,
             IntOp::DivU => a.checked_div(b)?,
             IntOp::RemS => (a as i64).checked_rem(b as i64)? as u64,
@@ -404,15 +402,12 @@ impl IntOp {
         match (a, b) {
             (Ok(x), Err(other)) | (Err(other), Ok(x)) => match (self, x.as_i64()) {
                 (IntOp::Add, 0)
-                | (IntOp::MulS, 1)
-                | (IntOp::MulU, 1)
+                | (IntOp::Mul, 1)
                 | (IntOp::And, -1)
                 | (IntOp::Or, 0)
                 | (IntOp::Xor, 0) => return Some(Err(other)),
 
-                (IntOp::MulS, 0) | (IntOp::MulU, 0) | (IntOp::And, 0) | (IntOp::Or, -1) => {
-                    return Some(Ok(x))
-                }
+                (IntOp::Mul, 0) | (IntOp::And, 0) | (IntOp::Or, -1) => return Some(Ok(x)),
 
                 _ => {}
             },
@@ -591,7 +586,7 @@ impl Val {
     pub fn int_neg<P>(v: Use<Val>) -> impl AllocIn<Cx<P>, Kind = Self> {
         move |cx: &Cx<P>| {
             let size = cx[v].size();
-            Val::Int(IntOp::MulS, size, v, cx.a(Const::new(size, size.mask())))
+            Val::Int(IntOp::Mul, size, v, cx.a(Const::new(size, size.mask())))
         }
     }
 

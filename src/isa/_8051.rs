@@ -338,18 +338,13 @@ impl Isa for _8051 {
                     let a = state.regs[Reg::A as usize];
                     let b = state.regs[Reg::B as usize];
                     let (a, b) = (
-                        val!(Int(IntOp::MulU, B8, a, b)),
+                        val!(Int(IntOp::Mul, B8, a, b)),
                         val!(Trunc(
                             B8,
                             val!(Int(
                                 IntOp::ShrU,
                                 B16,
-                                val!(Int(
-                                    IntOp::MulU,
-                                    B16,
-                                    val!(Zext(B16, a)),
-                                    val!(Zext(B16, b))
-                                )),
+                                val!(Int(IntOp::Mul, B16, val!(Zext(B16, a)), val!(Zext(B16, b)))),
                                 cx.a(Const::new(B8, 8))
                             ))
                         )),
