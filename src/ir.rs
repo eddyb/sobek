@@ -383,7 +383,11 @@ impl IntOp {
         } else {
             a.as_u64()
         };
-        let b = if is_signed && !is_shift {
+        let b = if is_shift {
+            // Mask the shift amount so that the number of bits shifted is always
+            // smaller than the number of total bits in the value being shifted.
+            (b.as_u8() & (size.bits() - 1)) as u64
+        } else if is_signed {
             b.as_i64() as u64
         } else {
             b.as_u64()
@@ -405,9 +409,9 @@ impl IntOp {
             IntOp::Or => a | b,
             IntOp::Xor => a ^ b,
 
-            IntOp::Shl => a.wrapping_shl(b as u32),
-            IntOp::ShrS => (a as i64).wrapping_shr(b as u32) as u64,
-            IntOp::ShrU => a.wrapping_shr(b as u32),
+            IntOp::Shl => a << b,
+            IntOp::ShrS => ((a as i64) >> b) as u64,
+            IntOp::ShrU => a >> b,
         };
         Some(Const::new(size, r & size.mask()))
     }
