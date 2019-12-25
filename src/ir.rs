@@ -798,6 +798,23 @@ impl Val {
             if let Some(c) = cx[x].as_const() {
                 return Ok(Val::Const(Const::new(size, c.as_u64() & size.mask())));
             }
+
+            // HACK(eddyb) replace `trunc({s,z}ext(y))` with something simpler.
+            // NOTE(eddyb) this doesn't seem to be hit in practice, maybe remove?
+            if let Val::Sext(_, y) | Val::Zext(_, y) = cx[x] {
+                let y_size = cx[y].size();
+                return if size == y_size {
+                    Err(y)
+                } else if size < y_size {
+                    Val::Trunc(size, y).normalize(cx)
+                } else {
+                    match cx[x] {
+                        Val::Sext(..) => Val::Sext(size, y).normalize(cx),
+                        Val::Zext(..) => Val::Zext(size, y).normalize(cx),
+                        _ => unreachable!(),
+                    }
+                };
+            }
         }
 
         if let Val::Sext(size, x) = self {
