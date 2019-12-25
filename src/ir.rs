@@ -741,7 +741,7 @@ impl Val {
         None
     }
 
-    fn normalize<P>(mut self, cx: &Cx<P>) -> Result<Self, Use<Self>> {
+    fn normalize<P>(self, cx: &Cx<P>) -> Result<Self, Use<Self>> {
         // TODO(eddyb) resolve loads.
 
         if let Val::Const(c) = self {
@@ -763,10 +763,7 @@ impl Val {
             let c_a = cx[a].as_const();
             let c_b = cx[b].as_const();
             if let Some(r) = op.simplify(c_a.ok_or(a), c_b.ok_or(b)) {
-                match r {
-                    Ok(x) => self = Val::Const(x),
-                    Err(x) => return Err(x),
-                }
+                return r.map(Val::Const);
             }
 
             // HACK(eddyb) replace `x + a` with `a + x` where `x` is constant.
@@ -799,7 +796,7 @@ impl Val {
             assert!(size < x_size);
 
             if let Some(c) = cx[x].as_const() {
-                self = Val::Const(Const::new(size, c.as_u64() & size.mask()));
+                return Ok(Val::Const(Const::new(size, c.as_u64() & size.mask())));
             }
         }
 
@@ -808,7 +805,10 @@ impl Val {
             assert!(size > x_size);
 
             if let Some(c) = cx[x].as_const() {
-                self = Val::Const(Const::new(size, (c.as_i64() as u64) & size.mask()));
+                return Ok(Val::Const(Const::new(
+                    size,
+                    (c.as_i64() as u64) & size.mask(),
+                )));
             }
         }
 
@@ -817,7 +817,7 @@ impl Val {
             assert!(size > x_size);
 
             if let Some(c) = cx[x].as_const() {
-                self = Val::Const(Const::new(size, c.as_u64()));
+                return Ok(Val::Const(Const::new(size, c.as_u64())));
             }
         }
 
