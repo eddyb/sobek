@@ -334,6 +334,13 @@ impl Isa for _8080 {
                     }
                     return Ok(state);
                 }
+                0xd9 => {
+                    eprintln!(
+                        "8080: partially unsupported LR35902 opcode 0x{:x} (RETI)",
+                        op
+                    );
+                    jump!(pop!(M16));
+                }
                 0x10 | 0xe8 | 0xf8 => {
                     imm!(8);
 
