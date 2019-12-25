@@ -822,6 +822,20 @@ impl Val {
                 }
                 _ => {}
             }
+
+            // HACK(eddyb) replace `(x & c1) | (x & c2)` with `x & (c1 | c2)`.
+            match (op, cx[a], cx[b]) {
+                (IntOp::Or, Val::Int(IntOp::And, _, x1, c1), Val::Int(IntOp::And, _, x2, c2)) => {
+                    if x1 == x2 {
+                        if let (Val::Const(c1), Val::Const(c2)) = (cx[c1], cx[c2]) {
+                            if let Some(c) = IntOp::Or.eval(c1, c2) {
+                                return Val::Int(IntOp::And, size, x1, cx.a(c)).normalize(cx);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
 
         // FIXME(eddyb) deduplicate these
