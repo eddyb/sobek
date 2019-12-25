@@ -806,6 +806,22 @@ impl Val {
                 }
                 _ => {}
             }
+
+            // HACK(eddyb) replace `x >> n << n` or `x << n >> n` with `x & mask`.
+            match (op, cx[a], cx[b]) {
+                (IntOp::Shl, Val::Int(inner_op @ IntOp::ShrU, _, x, n2), Val::Const(n))
+                | (IntOp::ShrU, Val::Int(inner_op @ IntOp::Shl, _, x, n2), Val::Const(n)) => {
+                    if cx[n2] == Val::Const(n) {
+                        let all_ones = Const::new(size, size.mask());
+                        if let Some(inner) = inner_op.eval(all_ones, n) {
+                            if let Some(mask) = op.eval(inner, n) {
+                                return Val::Int(IntOp::And, size, x, cx.a(mask)).normalize(cx);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
 
         // FIXME(eddyb) deduplicate these
