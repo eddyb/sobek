@@ -792,6 +792,20 @@ impl Val {
             if op == IntOp::Xor && a == b {
                 return Ok(Val::Const(Const::new(size, 0)));
             }
+
+            // HACK(eddyb) remove redundant `x & mask` where `x` has enough
+            // bits known (e.g. it's an unsigned shift right).
+            match (op, cx[a], cx[b]) {
+                (IntOp::And, Val::Int(IntOp::ShrU, _, _, shift), Val::Const(mask)) => {
+                    let all_ones = Const::new(size, size.mask());
+                    if let Val::Const(shift) = cx[shift] {
+                        if IntOp::ShrU.eval(all_ones, shift) == Some(mask) {
+                            return Err(a);
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
 
         // FIXME(eddyb) deduplicate these
