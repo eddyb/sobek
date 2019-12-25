@@ -5,10 +5,27 @@ use sobek::isa::_8051::_8051;
 use sobek::isa::_8080::_8080;
 use sobek::platform::n64::{self, N64};
 use std::iter;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 fn analyze_and_dump<P: Platform>(platform: P, entries: impl Iterator<Item = Const>) {
     let cx = Cx::new(platform);
-    let mut explorer = Explorer::new(&cx);
+
+    let cancel_token = Arc::new(AtomicBool::new(false));
+    let ctrcc_result = {
+        let cancel_token = cancel_token.clone();
+        ctrlc::set_handler(move || {
+            eprintln!("Ctrl-C: cancelling...");
+            cancel_token.store(true, Ordering::SeqCst);
+        })
+    };
+    match &ctrcc_result {
+        Ok(()) => eprintln!("Press Ctrl-C at any time to cancel analysis"),
+        Err(e) => eprintln!("warning: Ctrl-C not handled: {}", e),
+    }
+    let cancel_token = ctrcc_result.ok().map(|_| &*cancel_token);
+
+    let mut explorer = Explorer::new(&cx, cancel_token);
     for entry_pc in entries {
         explorer.explore_bbs(entry_pc);
     }

@@ -4,6 +4,7 @@ use crate::ir::{
 };
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fmt, mem};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -198,14 +199,17 @@ pub struct Explorer<'a, P> {
     pub cx: &'a Cx<P>,
     pub blocks: BTreeMap<BlockId, Block>,
 
+    cancel_token: Option<&'a AtomicBool>,
+
     exit_cache: HashMap<(BlockId, ExitOptions), Exit>,
 }
 
 impl<'a, P: Platform> Explorer<'a, P> {
-    pub fn new(cx: &'a Cx<P>) -> Self {
+    pub fn new(cx: &'a Cx<P>, cancel_token: Option<&'a AtomicBool>) -> Self {
         Explorer {
             cx,
             blocks: BTreeMap::new(),
+            cancel_token,
             exit_cache: HashMap::new(),
         }
     }
@@ -277,7 +281,8 @@ impl<'a, P: Platform> Explorer<'a, P> {
 
                     if let Set1::One(target_target) = target_exit.targets {
                         if self.cx[target_target].as_const().is_some() {
-                            panic!(
+                            // FIXME(eddyb) continuing after this point is probably wrong.
+                            println!(
                                 "explore: {:?} -> {:?} reached unexpected constant {}/{}",
                                 bb,
                                 direct_target_bb,
@@ -425,6 +430,13 @@ impl<'a, P: Platform> Explorer<'a, P> {
         // (i.e. the `entry.remove()` call) has a similar effect?
         loop {
             let mut exit = self.find_exit_uncached(bb, options);
+
+            // HACK(eddyb) find a more principled place to stick this in.
+            if let Some(cancel_token) = self.cancel_token {
+                if cancel_token.load(Ordering::Relaxed) {
+                    return exit;
+                }
+            }
 
             // Cycles are irrelevant if we're already fully general.
             if let Set1::Many = exit.targets {
