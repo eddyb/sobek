@@ -230,26 +230,39 @@ impl Isa for _8080 {
         let mut dst = Operand::decode((op >> 3) & 7);
         let mut src = Operand::decode(op & 7);
 
-        macro_rules! hl {
-            () => {
+        macro_rules! get_reg_pair {
+            ($i:expr) => {{
+                let i = $i as usize;
                 val!(Int(
                     IntOp::Or,
                     B16,
                     val!(Int(
                         IntOp::Shl,
                         B16,
-                        val!(Zext(B16, state.regs[Reg::H as usize])),
+                        val!(Zext(B16, state.regs[i])),
                         cx.a(Const::new(B8, 8))
                     )),
-                    val!(Zext(B16, state.regs[Reg::L as usize]))
+                    val!(Zext(B16, state.regs[i + 1]))
                 ))
-            };
+            }};
         }
+        macro_rules! set_reg_pair {
+            ($i:expr, $val:expr) => {{
+                let i = $i as usize;
+                let val = $val;
+                state.regs[i + 1] = val!(Trunc(B8, val));
+                state.regs[i] = val!(Trunc(
+                    B8,
+                    val!(Int(IntOp::ShrU, B16, val, cx.a(Const::new(B8, 8))))
+                ));
+            }};
+        }
+
         macro_rules! get {
             ($operand:expr) => {
                 match $operand {
                     Operand::Reg(i) => state.regs[i],
-                    Operand::Mem => val!(Load(mem_ref!(hl!(), M8))),
+                    Operand::Mem => val!(Load(mem_ref!(get_reg_pair!(Reg::H), M8))),
                 }
             };
             () => {
@@ -261,7 +274,9 @@ impl Isa for _8080 {
                 let val = $val;
                 match $operand {
                     Operand::Reg(i) => state.regs[i] = val,
-                    Operand::Mem => state.mem = mem!(Store(mem_ref!(hl!(), M8), val)),
+                    Operand::Mem => {
+                        state.mem = mem!(Store(mem_ref!(get_reg_pair!(Reg::H), M8), val))
+                    }
                 }
             }};
             ($val:expr) => {
@@ -340,45 +355,29 @@ impl Isa for _8080 {
         }
 
         match op {
-            _ if (op & 0xcf) == 0x01 => {
-                let i = Reg::B as usize + (op >> 4) as usize * 2;
-                if i == Reg::SP as usize {
-                    state.regs[i] = cx.a(imm!(16));
-                } else {
-                    state.regs[i + 1] = cx.a(imm!(8));
-                    state.regs[i] = cx.a(imm!(8));
-                }
-            }
-            _ if (op & 0xc7) == 0x03 => {
-                let i = Reg::B as usize + (op >> 4) as usize * 2;
+            _ if (op & 0xc5) == 0x01 => {
+                let mut i = Reg::B as usize + (op >> 4) as usize * 2;
                 let mut val = if i == Reg::SP as usize {
                     state.regs[i]
                 } else {
-                    val!(Int(
-                        IntOp::Or,
-                        B16,
-                        val!(Int(
-                            IntOp::Shl,
-                            B16,
-                            val!(Zext(B16, state.regs[i])),
-                            cx.a(Const::new(B8, 8))
-                        )),
-                        val!(Zext(B16, state.regs[i + 1]))
-                    ))
+                    get_reg_pair!(i)
                 };
-                val = if (op & 0x08) == 0 {
-                    val!(Int(IntOp::Add, B16, val, cx.a(Const::new(B16, 1))))
-                } else {
-                    val!(int_sub(val, cx.a(Const::new(B16, 1))))
+                val = match op & 0x0f {
+                    0x01 => cx.a(imm!(16)),
+                    0x03 => val!(Int(IntOp::Add, B16, val, cx.a(Const::new(B16, 1)))),
+                    0x09 => {
+                        // HACK(eddyb) this allows reusing the rest of the code.
+                        i = Reg::H as usize;
+
+                        val!(Int(IntOp::Add, B16, get_reg_pair!(Reg::H), val))
+                    }
+                    0x0b => val!(int_sub(val, cx.a(Const::new(B16, 1)))),
+                    _ => unreachable!(),
                 };
                 if i == Reg::SP as usize {
                     state.regs[i] = val;
                 } else {
-                    state.regs[i + 1] = val!(Trunc(B8, val));
-                    state.regs[i] = val!(Trunc(
-                        B8,
-                        val!(Int(IntOp::ShrU, B16, val, cx.a(Const::new(B8, 8))))
-                    ));
+                    set_reg_pair!(i, val)
                 }
             }
             _ if (op & 0xc0) == 0x40 || (op & 0xc7) == 0x06 => {
@@ -434,11 +433,21 @@ impl Isa for _8080 {
                     _ => unreachable!(),
                 };
             }
-            _ if (op & 0xc7) == 0xc2 => {
-                conditional!(Effect::Jump(cx.a(imm!(16))));
-            }
             _ if (op & 0xc7) == 0xc0 => {
                 conditional!(Effect::Jump(pop!(M16)));
+            }
+            _ if (op & 0xcb) == 0xc1 => {
+                // HACK(eddyb) this rotates `AF, BC, DE, HL` into `BC, DE, HL, AF`.
+                let i = ((op >> 4) + 1) & 0x3;
+                let i = Reg::A as usize + (i as usize) * 2;
+                if (op & 4) == 0 {
+                    set_reg_pair!(i, pop!(M16));
+                } else {
+                    push!(get_reg_pair!(i));
+                }
+            }
+            _ if (op & 0xc7) == 0xc2 => {
+                conditional!(Effect::Jump(cx.a(imm!(16))));
             }
             _ if (op & 0xc7) == 0xc4 => {
                 conditional!({
@@ -462,7 +471,7 @@ impl Isa for _8080 {
                 push!(cx.a(*pc));
                 jump!(target);
             }
-            0xe9 => jump!(hl!()),
+            0xe9 => jump!(get_reg_pair!(Reg::H)),
 
             0xd3 | 0xd8 | 0x22 | 0x2a => {
                 assert_eq!(flavor, Flavor::Intel);
