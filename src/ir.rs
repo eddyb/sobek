@@ -836,6 +836,20 @@ impl Val {
             if let Some(c) = cx[x].as_const() {
                 return Ok(Val::Const(Const::new(size, c.as_u64())));
             }
+
+            // HACK(eddyb) replace `zext(trunc(y))` by `y & mask`.
+            if let Val::Trunc(_, y) = cx[x] {
+                let y_size = cx[y].size();
+                if size == y_size {
+                    return Val::Int(
+                        IntOp::And,
+                        y_size,
+                        y,
+                        cx.a(Const::new(y_size, x_size.mask())),
+                    )
+                    .normalize(cx);
+                }
+            }
         }
 
         // TODO(eddyb) sort symmetric ops.
