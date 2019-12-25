@@ -144,10 +144,10 @@ impl Isa for _8051 {
 
         macro_rules! jump {
             ($target:expr) => {
-                return Err(Edges::One(Edge {
+                Err(Edges::One(Edge {
                     effect: Effect::Jump($target),
                     state,
-                }));
+                }))
             };
         }
         macro_rules! call {
@@ -175,11 +175,11 @@ impl Isa for _8051 {
 
                 assert_eq!(cx[cond].size(), B1);
 
-                return Err(Edges::Branch {
+                Err(Edges::Branch {
                     cond,
                     t: Edge { state: state.clone(), effect: Effect::Jump(t) },
                     e: Edge { state: state, effect: Effect::Jump(e) },
-                });
+                })
             }};
             ($cond:expr => $b:expr) => {
                 branch!($cond => $b, relative_target!(), cx.a(*pc))
@@ -194,9 +194,9 @@ impl Isa for _8051 {
             let addr11 = (((op >> 5) as u16) << 8) | imm!(8).as_u16();
             let target = cx.a(Const::new(B16, ((pc.as_u16() & 0xf800) | addr11) as u64));
             if (op & 0x10) == 0 {
-                jump!(target)
+                return jump!(target);
             } else {
-                call!(target)
+                return call!(target);
             }
         }
 
@@ -354,9 +354,9 @@ impl Isa for _8051 {
                 }
                 0xa => set!(get!(direct!())),
                 0xb if op == 0xb4 || op == 0xb5 => {
-                    branch!(val!(Int(IntOp::Eq, B8, get!(), state.regs[Reg::A as usize])) => false)
+                    return branch!(val!(Int(IntOp::Eq, B8, get!(), state.regs[Reg::A as usize])) => false);
                 }
-                0xb => branch!(val!(Int(IntOp::Eq, B8, get!(), cx.a(imm!(8)))) => false),
+                0xb => return branch!(val!(Int(IntOp::Eq, B8, get!(), cx.a(imm!(8)))) => false),
                 0xc if op == 0xc4 => set!(val!(bit_rol(get!(), cx.a(Const::new(B8, 4))))),
                 0xc => {
                     let a = state.regs[Reg::A as usize];
@@ -384,7 +384,7 @@ impl Isa for _8051 {
                 0xd => {
                     let val = val!(int_sub(get!(), cx.a(Const::new(B8, 1))));
                     set!(val);
-                    branch!(val!(Int(IntOp::Eq, B8, val, cx.a(Const::new(B8, 0)))) => false);
+                    return branch!(val!(Int(IntOp::Eq, B8, val, cx.a(Const::new(B8, 0)))) => false);
                 }
                 0xe if op == 0xe4 => set!(cx.a(Const::new(B8, 0))),
                 0xe => state.regs[Reg::A as usize] = get!(),
@@ -409,7 +409,7 @@ impl Isa for _8051 {
 
             match op {
                 0x00 => {}
-                0x02 => jump!(cx.a(imm!(16))),
+                0x02 => return jump!(cx.a(imm!(16))),
                 0x03 => {
                     state.regs[Reg::A as usize] = val!(bit_ror(
                         state.regs[Reg::A as usize],
@@ -429,14 +429,14 @@ impl Isa for _8051 {
                             cx.a(Const::new(B8, (!(1u8 << bit)) as u64))
                         )));
                     }
-                    branch!(val!(Int(IntOp::Eq, B8, bit_was_set, cx.a(Const::new(B8, 0)))) => op == 0x30);
+                    return branch!(val!(Int(IntOp::Eq, B8, bit_was_set, cx.a(Const::new(B8, 0)))) => op == 0x30);
                 }
-                0x12 => call!(cx.a(imm!(16))),
+                0x12 => return call!(cx.a(imm!(16))),
                 0x22 | 0x32 => {
                     if op == 0x32 {
                         eprintln!("8051: RETI incomplete");
                     }
-                    jump!(pop!(M16))
+                    return jump!(pop!(M16));
                 }
                 0x23 => {
                     state.regs[Reg::A as usize] = val!(bit_rol(
@@ -445,10 +445,10 @@ impl Isa for _8051 {
                     ))
                 }
                 0x40 | 0x50 => {
-                    branch!(val!(Int(IntOp::Eq, B1, state.regs[Reg::PSW_C as usize], cx.a(Const::new(B1, 0)))) => op == 0x50);
+                    return branch!(val!(Int(IntOp::Eq, B1, state.regs[Reg::PSW_C as usize], cx.a(Const::new(B1, 0)))) => op == 0x50);
                 }
                 0x60 | 0x70 => {
-                    branch!(val!(Int(IntOp::Eq, B8, state.regs[Reg::A as usize], cx.a(Const::new(B8, 0)))) => op == 0x60);
+                    return branch!(val!(Int(IntOp::Eq, B8, state.regs[Reg::A as usize], cx.a(Const::new(B8, 0)))) => op == 0x60);
                 }
                 0x42 | 0x43 | 0x52 | 0x53 | 0x62 | 0x63 => {
                     operand = direct!();
@@ -516,7 +516,7 @@ impl Isa for _8051 {
                         val!(Zext(B16, state.regs[Reg::A as usize]))
                     ));
                     if op == 0x73 {
-                        jump!(addr)
+                        return jump!(addr);
                     } else {
                         // HACK(eddyb) lift MOVC only with statically known addresses,
                         // until proper support is added for Harvard architectures.
@@ -538,7 +538,7 @@ impl Isa for _8051 {
                         }
                     }
                 }
-                0x80 => jump!(relative_target!()),
+                0x80 => return jump!(relative_target!()),
                 0x90 => {
                     state.regs[Reg::DPH as usize] = cx.a(imm!(8));
                     state.regs[Reg::DPL as usize] = cx.a(imm!(8));

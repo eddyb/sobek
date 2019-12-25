@@ -151,10 +151,10 @@ impl Isa for _8080 {
 
         macro_rules! jump {
             ($target:expr) => {
-                return Err(Edges::One(Edge {
+                Err(Edges::One(Edge {
                     effect: Effect::Jump($target),
                     state,
-                }));
+                }))
             };
         }
         macro_rules! relative_target {
@@ -188,7 +188,7 @@ impl Isa for _8080 {
 
                 assert_eq!(cx[cond].size(), B1);
 
-                return Err(Edges::Branch { cond, t, e });
+                Err(Edges::Branch { cond, t, e })
             }};
         }
 
@@ -297,11 +297,11 @@ impl Isa for _8080 {
 
         if flavor == Flavor::LR35902 {
             match op {
-                0x18 => jump!(relative_target!()),
+                0x18 => return jump!(relative_target!()),
                 _ if (op & 0xe7) == 0x20 => {
                     // FIXME(eddyb) fix the condition code decoding,
                     // once implemented, to match these up correctly.
-                    conditional!(Effect::Jump(relative_target!()));
+                    return conditional!(Effect::Jump(relative_target!()));
                 }
                 _ if (op & 0xed) == 0xe0 => {
                     let m = mem_ref!(
@@ -339,7 +339,7 @@ impl Isa for _8080 {
                         "8080: partially unsupported LR35902 opcode 0x{:x} (RETI)",
                         op
                     );
-                    jump!(pop!(M16));
+                    return jump!(pop!(M16));
                 }
                 0x10 | 0xe8 | 0xf8 => {
                     imm!(8);
@@ -441,7 +441,7 @@ impl Isa for _8080 {
                 };
             }
             _ if (op & 0xc7) == 0xc0 => {
-                conditional!(Effect::Jump(pop!(M16)));
+                return conditional!(Effect::Jump(pop!(M16)));
             }
             _ if (op & 0xcb) == 0xc1 => {
                 // HACK(eddyb) this rotates `AF, BC, DE, HL` into `BC, DE, HL, AF`.
@@ -454,10 +454,10 @@ impl Isa for _8080 {
                 }
             }
             _ if (op & 0xc7) == 0xc2 => {
-                conditional!(Effect::Jump(cx.a(imm!(16))));
+                return conditional!(Effect::Jump(cx.a(imm!(16))));
             }
             _ if (op & 0xc7) == 0xc4 => {
-                conditional!({
+                return conditional!({
                     let target = cx.a(imm!(16));
                     push!(cx.a(*pc));
                     Effect::Jump(target)
@@ -466,7 +466,7 @@ impl Isa for _8080 {
             _ if (op & 0xc7) == 0xc7 => {
                 let i = (op >> 3) & 7;
                 push!(cx.a(*pc));
-                jump!(cx.a(Const::new(B16, ((i as u16) * 8) as u64)));
+                return jump!(cx.a(Const::new(B16, ((i as u16) * 8) as u64)));
             }
 
             0x00 => {}
@@ -476,14 +476,14 @@ impl Isa for _8080 {
             0x3a => {
                 state.regs[Reg::A as usize] = val!(Load(mem_ref!(cx.a(imm!(16)))));
             }
-            0xc3 => jump!(cx.a(imm!(16))),
-            0xc9 => jump!(pop!(M16)),
+            0xc3 => return jump!(cx.a(imm!(16))),
+            0xc9 => return jump!(pop!(M16)),
             0xcd => {
                 let target = cx.a(imm!(16));
                 push!(cx.a(*pc));
-                jump!(target);
+                return jump!(target);
             }
-            0xe9 => jump!(get_reg_pair!(Reg::H)),
+            0xe9 => return jump!(get_reg_pair!(Reg::H)),
 
             0xd3 | 0xd8 | 0x22 | 0x2a => {
                 assert_eq!(flavor, Flavor::Intel);

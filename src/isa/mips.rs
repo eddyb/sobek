@@ -146,10 +146,10 @@ impl Isa for Mips32 {
                         effect: Effect::Trap { code: 1 },
                     })
                 })?;
-                return Err(Edges::One(Edge {
+                Err(Edges::One(Edge {
                     state,
                     effect: Effect::Jump(target),
-                }));
+                }))
             }};
         }
         macro_rules! branch_target {
@@ -183,11 +183,11 @@ impl Isa for Mips32 {
                         effect: Effect::Trap { code: 1 },
                     })
                 })?;
-                return Err(Edges::Branch {
+                Err(Edges::Branch {
                     cond,
                     t: Edge { state: state.clone(), effect: Effect::Jump(t) },
                     e: Edge { state: state, effect: Effect::Jump(e) },
-                });
+                })
             }};
             ($cond:expr => $b:expr) => {
                 branch!($cond => $b, branch_target!(), cx.a(add4(*pc)))
@@ -224,10 +224,10 @@ impl Isa for Mips32 {
                 2 => val!(Int(IntOp::ShrU, B32, rt, cx.a(Const::new(B32, sa as u64)))),
                 3 => val!(Int(IntOp::ShrS, B32, rt, cx.a(Const::new(B32, sa as u64)))),
 
-                8 => jump!(rs),
+                8 => return jump!(rs),
                 9 => {
                     link!(rd);
-                    jump!(rs);
+                    return jump!(rs);
                 }
 
                 32 | 33 => val!(Int(IntOp::Add, B32, rs, rt)),
@@ -270,8 +270,8 @@ impl Isa for Mips32 {
             // REGIMM (I format w/o rt).
             let rs = state.regs[rs];
             match rt {
-                0 => branch!(val!(Int(IntOp::LtS, B32, rs, zero)) => true),
-                1 => branch!(val!(Int(IntOp::LtS, B32, rs, zero)) => false),
+                0 => return branch!(val!(Int(IntOp::LtS, B32, rs, zero)) => true),
+                1 => return branch!(val!(Int(IntOp::LtS, B32, rs, zero)) => false),
                 _ => {
                     eprintln!("mips: REGIMM/rt={} unknown, emitting `Trap(3)`", rt);
                     return Err(Edges::One(Edge {
@@ -285,15 +285,15 @@ impl Isa for Mips32 {
             if op == 3 {
                 link!();
             }
-            jump!(cx.a(Const::new(
+            return jump!(cx.a(Const::new(
                 B32,
                 ((pc.as_u32() & 0xc000_0000) | (field(0, 26) << 2)) as u64
-            )))
+            )));
         } else if (op, rs, rt) == (4, 0, 0) {
             // Special-case `zero == zero` branches to jumps.
             // HACK(eddyb) this is done here to avoid const-folding
             // away control-flow in the general case.
-            jump!(branch_target!());
+            return jump!(branch_target!());
         } else if op == 16 || op == 17 || op == 18 {
             // COPz.
             let cp = op - 16;
@@ -338,10 +338,10 @@ impl Isa for Mips32 {
             }
 
             match op {
-                4 => branch!(val!(Int(IntOp::Eq, B32, rs, rt)) => true),
-                5 => branch!(val!(Int(IntOp::Eq, B32, rs, rt)) => false),
-                6 => branch!(val!(Int(IntOp::LtS, B32, zero, rs)) => false),
-                7 => branch!(val!(Int(IntOp::LtS, B32, zero, rs)) => true),
+                4 => return branch!(val!(Int(IntOp::Eq, B32, rs, rt)) => true),
+                5 => return branch!(val!(Int(IntOp::Eq, B32, rs, rt)) => false),
+                6 => return branch!(val!(Int(IntOp::LtS, B32, zero, rs)) => false),
+                7 => return branch!(val!(Int(IntOp::LtS, B32, zero, rs)) => true),
 
                 8..=14 => {
                     let op = match op {
