@@ -1067,7 +1067,7 @@ impl Use<Mem> {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum Effect {
     Jump(Use<Val>),
     PlatformCall { code: u32, ret_pc: Use<Val> },

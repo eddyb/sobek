@@ -254,11 +254,14 @@ impl<'a, P: Platform> Explorer<'a, P> {
     }
 
     fn find_exit_uncached(&mut self, bb: BlockId, options: ExitOptions) -> Exit {
-        let edge_effects = self
+        let edge_targets = self
             .get_or_lift_block(bb)
             .edges
             .as_ref()
-            .map(|e, _| e.effect);
+            .map(|e, _| match e.effect {
+                Effect::Jump(target) | Effect::PlatformCall { ret_pc: target, .. } => Some(target),
+                Effect::Trap { .. } => None,
+            });
         let mut exit_from_target = |direct_target: Use<Val>, br_cond: Option<bool>| {
             let direct_target = direct_target.subst_reduce(self.cx, None);
             if let Some(direct_target_bb) = self.cx[direct_target].as_const().map(BlockId::from) {
@@ -375,12 +378,10 @@ impl<'a, P: Platform> Explorer<'a, P> {
         };
         // TODO(eddyb) avoid duplicating work between the `t` and `e`
         // of a branch in `exit_from_target`, when they converge early.
-        edge_effects
-            .map(|effect, br_cond| match effect {
-                Effect::Jump(target) | Effect::PlatformCall { ret_pc: target, .. } => {
-                    exit_from_target(target, br_cond)
-                }
-                Effect::Trap { .. } => Exit {
+        edge_targets
+            .map(|target, br_cond| match target {
+                Some(target) => exit_from_target(target, br_cond),
+                None => Exit {
                     targets: Set1::Empty,
                     arg_values: Set1::Empty,
                     partial: None,
