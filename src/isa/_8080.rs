@@ -456,6 +456,11 @@ impl Isa for _8080 {
                     Effect::Jump(target)
                 });
             }
+            _ if (op & 0xc7) == 0xc7 => {
+                let i = (op >> 3) & 7;
+                push!(cx.a(*pc));
+                jump!(cx.a(Const::new(B16, ((i as u16) * 8) as u64)));
+            }
 
             0x00 => {}
             0x32 => {
