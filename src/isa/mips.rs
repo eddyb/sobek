@@ -86,15 +86,18 @@ impl Isa for Mips32 {
         pc: &mut Const,
         mut state: State,
     ) -> Result<State, Edges<Edge>> {
-        let instr = match cx.platform.rom().load(*pc, MemSize::M32) {
-            Ok(x) => x.as_u32(),
-            Err(e) => {
-                eprintln!("mips: failed to read ROM, emitting `Trap(0)`: {:?}", e);
+        macro_rules! error {
+            ($($args:tt)*) => {
                 return Err(Edges::One(Edge {
                     state,
-                    effect: Effect::Trap { code: 0 },
-                }));
+                    effect: Effect::Error(format!($($args)*)),
+                }))
             }
+        }
+
+        let instr = match cx.platform.rom().load(*pc, MemSize::M32) {
+            Ok(x) => x.as_u32(),
+            Err(e) => error!("failed to read ROM: {:?}", e),
         };
         let add4 = |x| IntOp::Add.eval(x, Const::new(x.size, 4)).unwrap();
         *pc = add4(*pc);
@@ -134,18 +137,17 @@ impl Isa for Mips32 {
             ($target:expr) => {{
                 let target = $target;
                 // Process delay slot.
-                let delay_pc = *pc;
-                state = Self::lift_instr(cx, pc, state).map_err(|edges| {
-                    eprintln!(
-                        "mips: delay slot at {:?} had effect, emitting `Trap(1)`: {}",
-                        delay_pc,
-                        cx.pretty_print_on_edges(edges.as_ref().map(|e, _| &e.effect))
-                    );
-                    edges.map(|e, _| Edge {
-                        state: e.state,
-                        effect: Effect::Trap { code: 1 },
-                    })
-                })?;
+                state = match Self::lift_instr(cx, pc, state) {
+                    Ok(state) => state,
+                    Err(edges) => {
+                        let effect = cx
+                            .pretty_print_on_edges(edges.as_ref().map(|e, _| &e.effect))
+                            .to_string();
+                        // HACK(eddyb) extract some `state` for `error!`.
+                        state = edges.map(|e, _| e.state).merge(|x, _| x);
+                        error!("delay slot had effect: {}", effect);
+                    }
+                };
                 Err(Edges::One(Edge {
                     state,
                     effect: Effect::Jump(target),
@@ -171,18 +173,17 @@ impl Isa for Mips32 {
                 assert_eq!(cx[cond].size(), B1);
 
                 // Process delay slot.
-                let delay_pc = *pc;
-                state = Self::lift_instr(cx, pc, state).map_err(|edges| {
-                    eprintln!(
-                        "mips: delay slot at {:?} had effect, emitting `Trap(1)`: {}",
-                        delay_pc,
-                        cx.pretty_print_on_edges(edges.as_ref().map(|e, _| &e.effect))
-                    );
-                    edges.map(|e, _| Edge {
-                        state: e.state,
-                        effect: Effect::Trap { code: 1 },
-                    })
-                })?;
+                state = match Self::lift_instr(cx, pc, state) {
+                    Ok(state) => state,
+                    Err(edges) => {
+                        let effect = cx.pretty_print_on_edges(
+                            edges.as_ref().map(|e, _| &e.effect),
+                        ).to_string();
+                        // HACK(eddyb) extract some `state` for `error!`.
+                        state = edges.map(|e, _| e.state).merge(|x, _| x);
+                        error!("delay slot had effect: {}", effect);
+                    }
+                };
                 Err(Edges::Branch {
                     cond,
                     t: Edge { state: state.clone(), effect: Effect::Jump(t) },
@@ -251,19 +252,7 @@ impl Isa for Mips32 {
                     ))
                 )),
 
-                funct => {
-                    eprintln!(
-                        "mips: SPECIAL/funct={} unknown, emitting `PlatformCall(0)`",
-                        funct
-                    );
-                    return Err(Edges::One(Edge {
-                        state,
-                        effect: Effect::PlatformCall {
-                            code: 0,
-                            ret_pc: cx.a(*pc),
-                        },
-                    }));
-                }
+                _ => error!("unknown SPECIAL funct={}", funct),
             };
             state.set(rd, v);
         } else if op == 1 {
@@ -272,13 +261,7 @@ impl Isa for Mips32 {
             match rt {
                 0 => return branch!(val!(Int(IntOp::LtS, B32, rs, zero)) => true),
                 1 => return branch!(val!(Int(IntOp::LtS, B32, rs, zero)) => false),
-                _ => {
-                    eprintln!("mips: REGIMM/rt={} unknown, emitting `Trap(3)`", rt);
-                    return Err(Edges::One(Edge {
-                        state,
-                        effect: Effect::Trap { code: 3 },
-                    }));
-                }
+                _ => error!("unknown REGIMM rt={}", rt),
             }
         } else if op == 2 || op == 3 {
             // J format.
@@ -298,29 +281,18 @@ impl Isa for Mips32 {
             // COPz.
             let cp = op - 16;
             let funct = field(0, 6);
+            // FIXME(eddyb) use something like `PlatformCall` here to represent
+            // the instruction opaquely.
             if cp == 1 {
-                eprintln!(
-                    "mips: COP1 (FPU), rs={}, rt={}, rd={}, funct={} unknown, ignoring",
+                error!(
+                    "unknown COP1 (FPU), rs={}, rt={}, rd={}, funct={}",
                     rs, rt, rd, funct
                 );
-                return Ok(state);
             }
-            eprintln!(
-                "mips: COP{}, rs={}, rt={}, rd={}, funct={} unknown, emitting `PlatformCall({:?})`",
-                cp,
-                rs,
-                rt,
-                rd,
-                funct,
-                Const::new(B32, instr as u64),
+            error!(
+                "unknown COP{}, rs={}, rt={}, rd={}, funct={}",
+                cp, rs, rt, rd, funct,
             );
-            return Err(Edges::One(Edge {
-                state,
-                effect: Effect::PlatformCall {
-                    code: instr,
-                    ret_pc: cx.a(*pc),
-                },
-            }));
         } else {
             // I format.
             let rd = rt;
@@ -383,16 +355,7 @@ impl Isa for Mips32 {
                 55 => state.set(rd, val!(Trunc(B32, val!(Load(mem_ref!(M64)))))),
                 63 => state.mem = mem!(Store(mem_ref!(M64), val!(Zext(B64, rt)))),
 
-                _ => {
-                    eprintln!("mips: op={} unknown, emitting `PlatformCall(1)`", op);
-                    return Err(Edges::One(Edge {
-                        state,
-                        effect: Effect::PlatformCall {
-                            code: 1,
-                            ret_pc: cx.a(*pc),
-                        },
-                    }));
-                }
+                _ => error!("unknown opcode 0x{:x} ({0})", op),
             }
         }
 

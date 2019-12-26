@@ -1070,8 +1070,11 @@ impl Use<Mem> {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum Effect {
     Jump(Use<Val>),
+
     PlatformCall { code: u32, ret_pc: Use<Val> },
     Trap { code: u32 },
+
+    Error(String),
 }
 
 impl fmt::Debug for Effect {
@@ -1085,6 +1088,7 @@ impl fmt::Debug for Effect {
                 ret_pc
             ),
             Effect::Trap { code } => write!(f, "trap({})", code),
+            Effect::Error(ref msg) => write!(f, "error({:?})", msg),
         }
     }
 }
@@ -1095,7 +1099,7 @@ impl Visit for Effect {
             Effect::Jump(target) | Effect::PlatformCall { ret_pc: target, .. } => {
                 visitor.visit_val_use(target);
             }
-            Effect::Trap { .. } => {}
+            Effect::Trap { .. } | Effect::Error(_) => {}
         }
     }
 }

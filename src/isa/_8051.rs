@@ -70,9 +70,21 @@ impl Isa for _8051 {
     ) -> Result<State, Edges<Edge>> {
         let add1 = |x| IntOp::Add.eval(x, Const::new(x.size, 1)).unwrap();
 
+        macro_rules! error {
+            ($($args:tt)*) => {
+                return Err(Edges::One(Edge {
+                    state,
+                    effect: Effect::Error(format!($($args)*)),
+                }))
+            }
+        }
+
         macro_rules! imm {
             (8) => {{
-                let v = cx.platform.rom().load(*pc, MemSize::M8).unwrap();
+                let v = match cx.platform.rom().load(*pc, MemSize::M8) {
+                    Ok(v) => v,
+                    Err(e) => error!("failed to read ROM: {:?}", e),
+                };
                 *pc = add1(*pc);
                 v
             }};
@@ -187,7 +199,7 @@ impl Isa for _8051 {
         }
 
         if op == 0xa5 {
-            panic!("8051: reserved opcode 0x{:x}", op);
+            error!("reserved opcode 0x{:x}", op);
         }
 
         if (op & 0xf) == 1 {
@@ -364,7 +376,7 @@ impl Isa for _8051 {
                     set!(a);
                 }
                 0xd if op == 0xd4 => {
-                    eprintln!("8051: decimal adjust");
+                    error!("unimplemented decimal adjust");
                 }
                 0xd if op == 0xd6 || op == 0xd7 => {
                     macro_rules! nibbles {
@@ -434,7 +446,7 @@ impl Isa for _8051 {
                 0x12 => return call!(cx.a(imm!(16))),
                 0x22 | 0x32 => {
                     if op == 0x32 {
-                        eprintln!("8051: RETI incomplete");
+                        error!("unimplemented RETI");
                     }
                     return jump!(pop!(M16));
                 }
@@ -524,10 +536,6 @@ impl Isa for _8051 {
                             state.regs[Reg::A as usize] =
                                 cx.a(cx.platform.rom().load(addr, MemSize::M8).unwrap());
                         } else {
-                            eprintln!(
-                                "8051: unsupported dynamic MOVC address: {}",
-                                cx.pretty_print(&addr)
-                            );
                             // HACK(eddyb) this uses a B16 memory address to
                             // avoid accidentally aliasing B8 memory addresses.
                             state.regs[Reg::A as usize] = val!(Load(MemRef {
@@ -535,6 +543,10 @@ impl Isa for _8051 {
                                 addr,
                                 size: MemSize::M8,
                             }));
+                            error!(
+                                "unsupported dynamic MOVC address: {}",
+                                cx.pretty_print(&addr)
+                            );
                         }
                     }
                 }
@@ -586,7 +598,7 @@ impl Isa for _8051 {
                         cx.a(Const::new(B8, 1 << bit))
                     )));
                 }
-                _ => eprintln!("8051: unsupported opcode 0x{:x}", op),
+                _ => error!("unsupported opcode 0x{:x}", op),
             }
         }
 

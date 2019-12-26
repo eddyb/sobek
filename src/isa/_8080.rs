@@ -68,17 +68,20 @@ impl Isa for _8080 {
 
         let add1 = |x| IntOp::Add.eval(x, Const::new(x.size, 1)).unwrap();
 
+        macro_rules! error {
+            ($($args:tt)*) => {
+                return Err(Edges::One(Edge {
+                    state,
+                    effect: Effect::Error(format!($($args)*)),
+                }))
+            }
+        }
+
         macro_rules! imm {
             (8) => {{
                 let v = match cx.platform.rom().load(*pc, MemSize::M8) {
                     Ok(v) => v,
-                    Err(e) => {
-                        eprintln!("8080: failed to read ROM, emitting `Trap(0)`: {:?}", e);
-                        return Err(Edges::One(Edge {
-                            state,
-                            effect: Effect::Trap { code: 0 },
-                        }));
-                    }
+                    Err(e) => error!("failed to read ROM: {:?}", e),
                 };
                 *pc = add1(*pc);
                 v
@@ -205,11 +208,7 @@ impl Isa for _8080 {
                 }
             };
         if reserved {
-            eprintln!("8080: reserved opcode, emitting `Trap(1)`: 0x{:x}", op);
-            return Err(Edges::One(Edge {
-                state,
-                effect: Effect::Trap { code: 1 },
-            }));
+            error!("reserved opcode: 0x{:x}", op);
         }
 
         enum Operand {
@@ -330,32 +329,26 @@ impl Isa for _8080 {
                     src = Operand::decode(sub_op & 7);
                     match sub_op & 0xf8 {
                         0x30 => set!(val!(bit_rol(get!(), cx.a(Const::new(B8, 4))))),
-                        _ => eprintln!("8080: unsupported LR35902 CB sub-opcode 0x{:x}", sub_op),
+                        _ => error!("unsupported LR35902 CB sub-opcode 0x{:x}", sub_op),
                     }
                     return Ok(state);
                 }
                 0xd9 => {
-                    eprintln!(
-                        "8080: partially unsupported LR35902 opcode 0x{:x} (RETI)",
-                        op
-                    );
+                    // FIXME(eddyb) fully implement RETI.
                     return jump!(pop!(M16));
                 }
                 0x10 | 0xe8 | 0xf8 => {
                     imm!(8);
 
-                    eprintln!("8080: unsupported LR35902 opcode 0x{:x}", op);
-                    return Ok(state);
+                    error!("unsupported LR35902 opcode 0x{:x}", op);
                 }
                 0x08 | 0xea | 0xfa => {
                     imm!(16);
 
-                    eprintln!("8080: unsupported LR35902 opcode 0x{:x}", op);
-                    return Ok(state);
+                    error!("unsupported LR35902 opcode 0x{:x}", op);
                 }
                 0x22 | 0x32 | 0x2a | 0x3a => {
-                    eprintln!("8080: unsupported LR35902 opcode 0x{:x}", op);
-                    return Ok(state);
+                    error!("unsupported LR35902 opcode 0x{:x}", op);
                 }
                 _ => {}
             }
@@ -487,10 +480,10 @@ impl Isa for _8080 {
 
             0xd3 | 0xd8 | 0x22 | 0x2a => {
                 assert_eq!(flavor, Flavor::Intel);
-                panic!("8080: unsupporteed opcode 0x{:x} requires immediate", op);
+                error!("unsupported opcode 0x{:x} requires immediate", op);
             }
 
-            _ => eprintln!("8080: unsupported opcode 0x{:x}", op),
+            _ => error!("unsupported opcode 0x{:x}", op),
         }
 
         Ok(state)
