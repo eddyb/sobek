@@ -18,26 +18,66 @@ pub struct _8080 {
 }
 
 // FIXME(eddyb) maybe replace `Reg` with enums like these.
+#[allow(non_camel_case_types)]
+#[derive(Copy, Clone)]
 pub enum Reg {
     A,
-    F,
+
     B,
     C,
+
     D,
     E,
+
     H,
     L,
+
     SP,
 
-    #[allow(non_camel_case_types)]
+    // Flag bits.
     F_C,
+    F_H, // AC on i8080, H on LR35902.
+    F_N, // Missing on i8080, N on LR35902.
+    F_Z,
+    F_S, // S on i8080, missing on LR35902.
+    F_P, // P on i8080, missing on LR35902.
+
+    IE, // Interrupt Enable.
+}
+
+impl Flavor {
+    fn flags(self) -> [Result<Reg, u8>; 8] {
+        use self::Reg::*;
+        match self {
+            Flavor::Intel => [
+                Ok(F_C),
+                Err(1),
+                Ok(F_P),
+                Err(0),
+                Ok(F_H),
+                Err(0),
+                Ok(F_Z),
+                Ok(F_S),
+            ],
+            Flavor::LR35902 => [
+                Err(0),
+                Err(0),
+                Err(0),
+                Err(0),
+                Ok(F_C),
+                Ok(F_H),
+                Ok(F_N),
+                Ok(F_Z),
+            ],
+        }
+    }
 }
 
 impl Isa for _8080 {
     const ADDR_SIZE: BitSize = B16;
 
     fn default_regs(cx: &Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>> {
-        ["a", "f", "b", "c", "d", "e", "h", "l"]
+        ["a", "b", "c", "d", "e", "h", "l"]
             .iter()
             .enumerate()
             .map(|(i, name)| crate::ir::Reg {
@@ -50,10 +90,22 @@ impl Isa for _8080 {
                 size: B16,
                 name: "sp",
             }))
+            .chain(
+                // FIXME(eddyb) perhaps change names or even use different
+                // sets of flags, depending on flavor.
+                ["f.c", "f.h", "f.n", "f.z", "f.s", "f.p"]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| crate::ir::Reg {
+                        index: Reg::F_C as usize + i,
+                        size: B1,
+                        name,
+                    }),
+            )
             .chain(iter::once(crate::ir::Reg {
-                index: Reg::F_C as usize,
+                index: Reg::IE as usize,
                 size: B1,
-                name: "f.c",
+                name: "ie",
             }))
             .map(|reg| cx.a(Val::InReg(reg)))
             .collect()
@@ -232,6 +284,9 @@ impl Isa for _8080 {
         macro_rules! get_reg_pair {
             ($i:expr) => {{
                 let i = $i as usize;
+                assert!(i >= Reg::B as usize);
+                assert_eq!((i - (Reg::B as usize)) & 1, 0);
+                assert!(i <= Reg::H as usize);
                 val!(Int(
                     IntOp::Or,
                     B16,
@@ -248,6 +303,9 @@ impl Isa for _8080 {
         macro_rules! set_reg_pair {
             ($i:expr, $val:expr) => {{
                 let i = $i as usize;
+                assert!(i >= Reg::B as usize);
+                assert_eq!((i - (Reg::B as usize)) & 1, 0);
+                assert!(i <= Reg::H as usize);
                 let val = $val;
                 state.regs[i + 1] = val!(Trunc(B8, val));
                 state.regs[i] = val!(Trunc(
@@ -261,7 +319,7 @@ impl Isa for _8080 {
             ($operand:expr) => {
                 match $operand {
                     Operand::Reg(i) => state.regs[i],
-                    Operand::Mem => val!(Load(mem_ref!(get_reg_pair!(Reg::H), M8))),
+                    Operand::Mem => val!(Load(mem_ref!(get_reg_pair!(Reg::H)))),
                 }
             };
             () => {
@@ -273,9 +331,7 @@ impl Isa for _8080 {
                 let val = $val;
                 match $operand {
                     Operand::Reg(i) => state.regs[i] = val,
-                    Operand::Mem => {
-                        state.mem = mem!(Store(mem_ref!(get_reg_pair!(Reg::H), M8), val))
-                    }
+                    Operand::Mem => state.mem = mem!(Store(mem_ref!(get_reg_pair!(Reg::H)), val)),
                 }
             }};
             ($val:expr) => {
@@ -296,14 +352,36 @@ impl Isa for _8080 {
 
         if flavor == Flavor::LR35902 {
             match op {
+                0x08 => {
+                    let m = mem_ref!(cx.a(imm!(16)), M16);
+                    state.mem = mem!(Store(m, state.regs[Reg::SP as usize]));
+                    return Ok(state);
+                }
                 0x18 => return jump!(relative_target!()),
                 _ if (op & 0xe7) == 0x20 => {
                     // FIXME(eddyb) fix the condition code decoding,
                     // once implemented, to match these up correctly.
                     return conditional!(Effect::Jump(relative_target!()));
                 }
-                _ if (op & 0xed) == 0xe0 => {
-                    let m = mem_ref!(
+                _ if (op & 0xe7) == 0x22 => {
+                    if (op & 0x0f) == 0x02 {
+                        set!(Operand::Mem, state.regs[Reg::A as usize]);
+                    } else {
+                        state.regs[Reg::A as usize] = get!(Operand::Mem);
+                    }
+                    let hl = get_reg_pair!(Reg::H);
+                    let hl = if (op & 0xf0) == 0x20 {
+                        val!(Int(IntOp::Add, B16, hl, cx.a(Const::new(B16, 1))))
+                    } else {
+                        val!(int_sub(hl, cx.a(Const::new(B16, 1))))
+                    };
+                    set_reg_pair!(Reg::H, hl);
+                    return Ok(state);
+                }
+                _ if (op & 0xed) == 0xe0 || (op & 0xef) == 0xea => {
+                    let addr = if (op & 0x0f) == 0x0a {
+                        cx.a(imm!(16))
+                    } else {
                         val!(Int(
                             IntOp::Add,
                             B16,
@@ -313,9 +391,9 @@ impl Isa for _8080 {
                             } else {
                                 val!(Zext(B16, state.regs[Reg::C as usize]))
                             }
-                        )),
-                        M8
-                    );
+                        ))
+                    };
+                    let m = mem_ref!(addr);
                     if (op & 0xf0) == 0xe0 {
                         state.mem = mem!(Store(m, state.regs[Reg::A as usize]));
                     } else {
@@ -327,27 +405,85 @@ impl Isa for _8080 {
                     let sub_op = imm!(8).as_u8();
                     dst = Operand::decode(sub_op & 7);
                     src = Operand::decode(sub_op & 7);
-                    match sub_op & 0xf8 {
-                        0x30 => set!(val!(bit_rol(get!(), cx.a(Const::new(B8, 4))))),
-                        _ => error!("unsupported LR35902 CB sub-opcode 0x{:x}", sub_op),
-                    }
+
+                    // NB: only used by 0x40..=0xFF (BIT, RES, SET).
+                    let bit_mask: u8 = 1 << ((sub_op >> 3) & 7);
+
+                    let val = get!();
+                    let val = match sub_op & 0xf8 {
+                        0x00 => {
+                            val!(bit_rol(val, cx.a(Const::new(B8, 1))))
+                            // FIXME(eddyb) set the flags.
+                        }
+                        0x08 => {
+                            val!(bit_ror(val, cx.a(Const::new(B8, 1))))
+                            // FIXME(eddyb) set the flags.
+                        }
+                        0x10 => {
+                            val!(bit_rol(val, cx.a(Const::new(B8, 1))))
+                            // FIXME(eddyb) set (and read) the flags.
+                        }
+                        0x18 => {
+                            val!(bit_ror(val, cx.a(Const::new(B8, 1))))
+                            // FIXME(eddyb) set (and read) the flags.
+                        }
+                        0x20 => {
+                            val!(Int(IntOp::Shl, B8, val, cx.a(Const::new(B8, 1))))
+                            // FIXME(eddyb) set the flags.
+                        }
+                        0x28 => {
+                            val!(Int(IntOp::ShrS, B8, val, cx.a(Const::new(B8, 1))))
+                            // FIXME(eddyb) set the flags.
+                        }
+                        0x30 => {
+                            val!(bit_rol(val, cx.a(Const::new(B8, 4))))
+                            // FIXME(eddyb) set the flags.
+                        }
+                        0x38 => {
+                            val!(Int(IntOp::ShrU, B8, val, cx.a(Const::new(B8, 1))))
+                            // FIXME(eddyb) set the flags.
+                        }
+                        0x40..=0x78 => {
+                            state.regs[Reg::F_Z as usize] = val!(Int(
+                                IntOp::Eq,
+                                B8,
+                                val!(Int(
+                                    IntOp::And,
+                                    B8,
+                                    val,
+                                    cx.a(Const::new(B8, bit_mask as u64))
+                                )),
+                                cx.a(Const::new(B8, 0))
+                            ));
+                            state.regs[Reg::F_N as usize] = cx.a(Const::new(B1, 0));
+                            state.regs[Reg::F_H as usize] = cx.a(Const::new(B1, 1));
+
+                            return Ok(state);
+                        }
+                        0x80..=0xb8 => val!(Int(
+                            IntOp::And,
+                            B8,
+                            val,
+                            cx.a(Const::new(B8, !bit_mask as u64))
+                        )),
+                        0xc0..=0xf8 => val!(Int(
+                            IntOp::Or,
+                            B8,
+                            val,
+                            cx.a(Const::new(B8, bit_mask as u64))
+                        )),
+                        _ => unreachable!(),
+                    };
+                    set!(val);
                     return Ok(state);
                 }
                 0xd9 => {
-                    // FIXME(eddyb) fully implement RETI.
+                    state.regs[Reg::IE as usize] = cx.a(Const::new(B1, 1));
                     return jump!(pop!(M16));
                 }
                 0x10 | 0xe8 | 0xf8 => {
                     imm!(8);
 
-                    error!("unsupported LR35902 opcode 0x{:x}", op);
-                }
-                0x08 | 0xea | 0xfa => {
-                    imm!(16);
-
-                    error!("unsupported LR35902 opcode 0x{:x}", op);
-                }
-                0x22 | 0x32 | 0x2a | 0x3a => {
                     error!("unsupported LR35902 opcode 0x{:x}", op);
                 }
                 _ => {}
@@ -379,6 +515,16 @@ impl Isa for _8080 {
                 } else {
                     set_reg_pair!(i, val)
                 }
+            }
+            _ if (op & 0xe7) == 0x02 => {
+                let addr = get_reg_pair!(Reg::B as usize + (op >> 4) as usize * 2);
+                let m = mem_ref!(addr);
+                if (op & 0x0f) == 0x02 {
+                    state.mem = mem!(Store(m, state.regs[Reg::A as usize]));
+                } else {
+                    state.regs[Reg::A as usize] = val!(Load(m));
+                }
+                return Ok(state);
             }
             _ if (op & 0xc0) == 0x40 || (op & 0xc7) == 0x06 => {
                 set!(get_src!());
@@ -436,10 +582,53 @@ impl Isa for _8080 {
             _ if (op & 0xc7) == 0xc0 => {
                 return conditional!(Effect::Jump(pop!(M16)));
             }
+            // HACK(eddyb) `push AF` / `pop AF` are special-cased because `AF`
+            // is not supported by `{get,set}_reg_pair!`, as this is the only
+            // place where flags are encoded/decoded into/from a byte.
+            0xf1 => {
+                let flags = pop!(M8);
+                for (i, &flag) in flavor.flags().iter().enumerate() {
+                    if let Ok(reg) = flag {
+                        state.regs[reg as usize] = val!(Trunc(
+                            B1,
+                            val!(Int(IntOp::ShrU, B8, flags, cx.a(Const::new(B8, i as u64))))
+                        ));
+                    }
+                }
+
+                state.regs[Reg::A as usize] = pop!(M8);
+            }
+            0xf5 => {
+                push!(state.regs[Reg::A as usize]);
+
+                push!(flavor
+                    .flags()
+                    .iter()
+                    .map(|&flag| {
+                        match flag {
+                            Ok(reg) => state.regs[reg as usize],
+                            Err(c) => cx.a(Const::new(B1, c as u64)),
+                        }
+                    })
+                    .enumerate()
+                    .map(|(i, bit)| {
+                        val!(Int(
+                            IntOp::Shl,
+                            B8,
+                            val!(Zext(B8, bit)),
+                            cx.a(Const::new(B8, i as u64))
+                        ))
+                    })
+                    .fold(cx.a(Const::new(B8, 0)), |a, b| val!(Int(
+                        IntOp::Or,
+                        B8,
+                        a,
+                        b
+                    ))));
+            }
             _ if (op & 0xcb) == 0xc1 => {
-                // HACK(eddyb) this rotates `AF, BC, DE, HL` into `BC, DE, HL, AF`.
-                let i = ((op >> 4) + 1) & 0x3;
-                let i = Reg::A as usize + (i as usize) * 2;
+                let i = (op >> 4) & 0x3;
+                let i = Reg::B as usize + (i as usize) * 2;
                 if (op & 4) == 0 {
                     set_reg_pair!(i, pop!(M16));
                 } else {
@@ -461,8 +650,24 @@ impl Isa for _8080 {
                 push!(cx.a(*pc));
                 return jump!(cx.a(Const::new(B16, ((i as u16) * 8) as u64)));
             }
+            _ if op & 0xf7 == 0xf3 => {
+                state.regs[Reg::IE as usize] = cx.a(Const::new(B1, ((op >> 3) & 1) as u64));
+            }
 
             0x00 => {}
+            0x07 => {
+                state.regs[Reg::A as usize] = val!(bit_rol(
+                    state.regs[Reg::A as usize],
+                    cx.a(Const::new(B8, 1))
+                ));
+                // FIXME(eddyb) set the flags.
+            }
+            0x27 => {
+                // FIXME(eddyb) actually implement.
+            }
+            0x2f => {
+                state.regs[Reg::A as usize] = val!(bit_not(state.regs[Reg::A as usize]));
+            }
             0x32 => {
                 state.mem = mem!(Store(mem_ref!(cx.a(imm!(16))), state.regs[Reg::A as usize]));
             }
@@ -477,6 +682,12 @@ impl Isa for _8080 {
                 return jump!(target);
             }
             0xe9 => return jump!(get_reg_pair!(Reg::H)),
+            0xeb => {
+                let de = get_reg_pair!(Reg::D);
+                let hl = get_reg_pair!(Reg::H);
+                set_reg_pair!(Reg::D, hl);
+                set_reg_pair!(Reg::H, de);
+            }
 
             0xd3 | 0xd8 | 0x22 | 0x2a => {
                 assert_eq!(flavor, Flavor::Intel);
