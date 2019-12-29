@@ -5,6 +5,7 @@ pub mod isa {
 }
 pub mod explore;
 pub mod ir;
+pub mod nest;
 pub mod platform {
     pub mod n64;
 }

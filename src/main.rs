@@ -1,4 +1,4 @@
-use sobek::explore::{BlockId, Explorer};
+use sobek::explore::Explorer;
 use sobek::ir::{BitSize, Const, Cx, Platform, RawRom, SimplePlatform};
 use sobek::isa::mips::Mips32;
 use sobek::isa::_8051::_8051;
@@ -32,21 +32,9 @@ fn analyze_and_dump<P: Platform>(platform: P, entries: impl Iterator<Item = Cons
 
     explorer.split_overlapping_bbs();
 
-    let mut last_end = explorer.blocks.keys().next().unwrap().entry_pc;
-    for (&bb, block) in &explorer.blocks {
-        if last_end < bb.entry_pc {
-            println!("{:?} {{", BlockId { entry_pc: last_end });
-            println!("    /* {} unanalyzed bytes */", bb.entry_pc - last_end);
-            println!("}}");
-        }
-        println!(
-            "{:?} {}",
-            bb,
-            cx.pretty_print_with_states_on_edges(
-                block.edges.as_ref().map(|e, _| (&e.state, &e.effect))
-            )
-        );
-        last_end = block.pc.end.as_u64();
+    let nester = sobek::nest::Nester::new(&explorer);
+    for nested_block in nester.all_nested_blocks() {
+        println!("{}", nester.nested_block_to_string(&nested_block));
     }
 }
 
