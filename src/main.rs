@@ -30,6 +30,8 @@ fn analyze_and_dump<P: Platform>(platform: P, entries: impl Iterator<Item = Cons
         explorer.explore_bbs(entry_pc);
     }
 
+    explorer.split_overlapping_bbs();
+
     let mut last_end = explorer.blocks.keys().next().unwrap().entry_pc;
     for (&bb, block) in &explorer.blocks {
         if last_end < bb.entry_pc {

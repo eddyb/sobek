@@ -217,7 +217,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
     pub fn get_or_lift_block(&mut self, bb: BlockId) -> &Block {
         // FIXME(eddyb) clean this up whenever NLL/Polonius can do the
         // efficient check (`if let Some(x) = map.get(k) { return x; }`).
-        if !self.blocks.contains_key(&bb) {
+        while !self.blocks.contains_key(&bb) {
             let mut state = self.cx.default.clone();
             let mut pc = Const::new(P::Isa::ADDR_SIZE, bb.entry_pc);
             let edges = loop {
@@ -235,9 +235,54 @@ impl<'a, P: Platform> Explorer<'a, P> {
                 }
             };
 
+            // HACK(eddyb) detect the simplest self-loops, and split the block.
+            let retry = edges
+                .as_ref()
+                .map(|e, _| match e.effect {
+                    Effect::Jump(target)
+                    | Effect::Opaque {
+                        next_pc: target, ..
+                    } => self.cx[target]
+                        .as_const()
+                        .map(BlockId::from)
+                        .filter(|&target| bb < target && target.entry_pc < pc.as_u64())
+                        .map(|target| self.get_or_lift_block(target))
+                        .is_some(),
+                    Effect::Error(_) => false,
+                })
+                .merge(|a, b| a | b);
+            if retry {
+                continue;
+            }
+
             self.blocks.insert(bb, Block { pc: ..pc, edges });
+            break;
         }
         &self.blocks[&bb]
+    }
+
+    /// Split any blocks that overlap the block following them.
+    /// Warning: this may invalidate analyses sensitive to the distinction.
+    pub fn split_overlapping_bbs(&mut self) {
+        let bb_range_after = |this: &Self, start: Option<BlockId>| {
+            use std::ops::Bound::*;
+            this.blocks
+                .range((start.map_or(Unbounded, Excluded), Unbounded))
+                .map(|(&bb, block)| bb..BlockId::from(block.pc.end))
+                .next()
+        };
+
+        if let Some(mut bb) = bb_range_after(self, None) {
+            while let Some(next) = bb_range_after(self, Some(bb.start)) {
+                // Split overlapping blocks by discarding and re-lifting them.
+                if bb.contains(&next.start) {
+                    self.blocks.remove(&bb.start);
+                    self.get_or_lift_block(bb.start);
+                }
+
+                bb = next;
+            }
+        }
     }
 
     pub fn explore_bbs(&mut self, entry_pc: Const) {
