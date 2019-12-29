@@ -1,7 +1,7 @@
 use crate::ir::{
     BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, IntOp, Isa, Mem, MemRef, MemSize, Platform, Reg, Rom, State,
-    Use, Val,
+    Const, Cx, Edge, Edges, Effect, IntOp, Isa, Mem, MemRef, MemSize, Platform, Rom, State, Use,
+    Val,
 };
 use std::iter;
 
@@ -34,49 +34,71 @@ impl Mips32 {
     }
 }
 
+macro_rules! reg_names {
+    ($($name:ident)*) => {
+        ([$(stringify!($name)),*], [$(concat!(stringify!($name), ".upper")),*])
+    }
+}
+
+const GPR_NAMES: ([&str; 32], [&str; 32]) = reg_names![
+    zero
+    at
+    rv0 rv1
+    a0 a1 a2 a3
+    t0 t1 t2 t3 t4 t5 t6 t7
+    s0 s1 s2 s3 s4 s5 s6 s7
+    t8 t9
+    k0 k1
+    gp
+    sp
+    fp
+    ra
+];
+
+const MUL_DIV_REG_NAMES: ([&str; 2], [&str; 2]) = reg_names![lo hi];
+
+enum Reg {
+    Lo = 32,
+    Hi,
+}
+
+const NUM_REGS: usize = 32 + 2;
+
 impl State {
     fn set(&mut self, r: usize, v: Use<Val>) {
-        if r != 0 {
+        if r != 0 && r != NUM_REGS {
             self.regs[r] = v;
         }
     }
 }
 
-#[rustfmt::skip]
-const REG_NAMES: [&str; 32] = [
-    "zero",
-    "at",
-    "rv0", "rv1",
-    "a0", "a1", "a2", "a3",
-    "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7",
-    "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
-    "t8", "t9",
-    "k0", "k1",
-    "gp",
-    "sp",
-    "fp",
-    "ra",
-];
-
 impl Isa for Mips32 {
     const ADDR_SIZE: BitSize = B32;
 
     fn default_regs(cx: &Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>> {
-        iter::once(Val::Const(Const::new(B32, 0)))
-            .chain((1..32).map(|i| {
-                Val::InReg(Reg {
-                    index: i,
-                    size: B32,
-                    name: REG_NAMES[i],
-                })
-            }))
-            .chain(["lo", "hi"].iter().enumerate().map(|(i, name)| {
-                Val::InReg(Reg {
-                    index: 32 + i,
-                    size: B32,
-                    name,
-                })
-            }))
+        let lower = (&GPR_NAMES.0, &MUL_DIV_REG_NAMES.0);
+        let upper = (&GPR_NAMES.1, &MUL_DIV_REG_NAMES.1);
+        [lower, upper]
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &(gpr_names, mul_div_reg_names))| {
+                let base = i * NUM_REGS;
+                iter::once(Val::Const(Const::new(B32, 0)))
+                    .chain((1..32).map(move |i| {
+                        Val::InReg(crate::ir::Reg {
+                            index: base + i,
+                            size: B32,
+                            name: gpr_names[i],
+                        })
+                    }))
+                    .chain(mul_div_reg_names.iter().enumerate().map(move |(i, name)| {
+                        Val::InReg(crate::ir::Reg {
+                            index: base + Reg::Lo as usize + i,
+                            size: B32,
+                            name,
+                        })
+                    }))
+            })
             .map(|v| cx.a(v))
             .collect()
     }
@@ -231,6 +253,48 @@ impl Isa for Mips32 {
             };
         }
 
+        let mut size = B32;
+        macro_rules! get_reg_maybe64 {
+            ($i:expr) => {{
+                let i = $i as usize;
+                match size {
+                    B64 => val!(Int(
+                        IntOp::Or,
+                        B64,
+                        val!(Int(
+                            IntOp::Shl,
+                            B64,
+                            val!(Zext(B64, state.regs[NUM_REGS + i])),
+                            cx.a(Const::new(B8, 32))
+                        )),
+                        val!(Zext(B64, state.regs[i]))
+                    )),
+                    B32 => state.regs[i],
+                    _ => unreachable!(),
+                }
+            }};
+        }
+        macro_rules! set_reg_maybe64 {
+            ($i:expr, $val:expr) => {{
+                let i = $i as usize;
+                let val = $val;
+                match size {
+                    B64 => {
+                        state.set(i, val!(Trunc(B32, val)));
+                        state.set(
+                            NUM_REGS + i,
+                            val!(Trunc(
+                                B32,
+                                val!(Int(IntOp::ShrU, B64, val, cx.a(Const::new(B8, 32))))
+                            )),
+                        );
+                    }
+                    B32 => state.set(i, val),
+                    _ => unreachable!(),
+                }
+            }};
+        }
+
         if op == 0 {
             // SPECIAL (R format and syscall/break).
             let funct = field(0, 6);
@@ -251,8 +315,19 @@ impl Isa for Mips32 {
                 _ => {}
             }
 
-            let rs = state.regs[rs];
-            let rt = state.regs[rt];
+            if let 20 | 22 | 23 | 28..=31 | 44..=47 | 56 | 58..=60 | 62 | 63 = funct {
+                // HACK(eddyb) force `{get,set}_reg_maybe64` below into 64-bit mode.
+                size = B64;
+            }
+
+            if let 16..=19 = funct {
+                // HACK(eddyb) unlike the above, these aren't 64-bit instructions,
+                // but the whole value does need to be copied, in case it's used.
+                size = B64;
+            }
+
+            let rs = get_reg_maybe64!(rs);
+            let rt = get_reg_maybe64!(rt);
             let sa = field(6, 5);
             let v = match funct {
                 0 => val!(Int(IntOp::Shl, B32, rt, cx.a(Const::new(B32, sa as u64)))),
@@ -265,6 +340,39 @@ impl Isa for Mips32 {
                     return jump!(rs);
                 }
 
+                16 => get_reg_maybe64!(Reg::Hi as usize),
+                17 => {
+                    set_reg_maybe64!(Reg::Hi as usize, rs);
+                    return Ok(state);
+                }
+                18 => get_reg_maybe64!(Reg::Lo as usize),
+                19 => {
+                    set_reg_maybe64!(Reg::Lo as usize, rs);
+                    return Ok(state);
+                }
+
+                26 | 30 => {
+                    set_reg_maybe64!(Reg::Lo as usize, val!(Int(IntOp::DivS, size, rs, rt)));
+                    set_reg_maybe64!(Reg::Hi as usize, val!(Int(IntOp::RemS, size, rs, rt)));
+                    return Ok(state);
+                }
+
+                27 | 31 => {
+                    set_reg_maybe64!(Reg::Lo as usize, val!(Int(IntOp::DivU, size, rs, rt)));
+                    set_reg_maybe64!(Reg::Hi as usize, val!(Int(IntOp::RemU, size, rs, rt)));
+                    return Ok(state);
+                }
+
+                28 | 29 => {
+                    // FIXME(eddyb) perform actual 128-bit multiplies, using
+                    // `Sext(B128, ...)` for `funct=28`, and `Zext(B128, ...)`
+                    // for `funct=29`, or emulate it using 64-bit operations only.
+                    let result = val!(Int(IntOp::Mul, size, rs, rt));
+                    set_reg_maybe64!(Reg::Lo as usize, result);
+                    set_reg_maybe64!(Reg::Hi as usize, cx.a(Const::new(size, 0)));
+                    return Ok(state);
+                }
+
                 32 | 33 => val!(Int(IntOp::Add, B32, rs, rt)),
                 34 | 35 => val!(int_sub(rs, rt)),
                 36 => val!(Int(IntOp::And, B32, rs, rt)),
@@ -274,21 +382,22 @@ impl Isa for Mips32 {
                 42 => val!(Zext(B32, val!(Int(IntOp::LtS, B32, rs, rt)))),
                 43 => val!(Zext(B32, val!(Int(IntOp::LtU, B32, rs, rt)))),
 
-                // FIXME(eddyb) figure out if these are the correct semantics for the
-                // Doubleword R-format instructions in 32-bit mode on MIPS64.
-                63 => val!(Trunc(
-                    B32,
-                    val!(Int(
-                        IntOp::ShrU,
-                        B64,
-                        val!(Zext(B64, rt)),
-                        cx.a(Const::new(B32, sa as u64 + 32))
-                    ))
+                60 => val!(Int(
+                    IntOp::Shl,
+                    size,
+                    rt,
+                    cx.a(Const::new(B8, sa as u64 + 32))
+                )),
+                63 => val!(Int(
+                    IntOp::ShrU,
+                    size,
+                    rt,
+                    cx.a(Const::new(B8, sa as u64 + 32))
                 )),
 
                 _ => error!("unknown SPECIAL funct={}", funct),
             };
-            state.set(rd, v);
+            set_reg_maybe64!(rd, v);
         } else if op == 1 {
             // REGIMM (I format w/o rt).
             let rs = state.regs[rs];
@@ -343,9 +452,15 @@ impl Isa for Mips32 {
             }));
         } else {
             // I format.
+
+            if let 24..=27 | 39 | 44 | 45 | 52 | 55 | 60 | 63 = op {
+                // HACK(eddyb) force `{get,set}_reg_maybe64` below into 64-bit mode.
+                size = B64;
+            }
+
             let rd = rt;
             let rs = state.regs[rs];
-            let rt = state.regs[rt];
+            let rt = get_reg_maybe64!(rt);
 
             macro_rules! mem_ref {
                 ($sz:ident) => {
@@ -398,10 +513,8 @@ impl Isa for Mips32 {
                 41 => state.mem = mem!(Store(mem_ref!(M16), val!(Trunc(B16, rt)))),
                 43 => state.mem = mem!(Store(mem_ref!(M32), rt)),
 
-                // FIXME(eddyb) figure out if these are the correct semantics for the
-                // LD/SD (Load/Store Doubleword) instructions in 32-bit mode on MIPS64.
-                55 => state.set(rd, val!(Trunc(B32, val!(Load(mem_ref!(M64)))))),
-                63 => state.mem = mem!(Store(mem_ref!(M64), val!(Zext(B64, rt)))),
+                55 => set_reg_maybe64!(rd, val!(Load(mem_ref!(M64)))),
+                63 => state.mem = mem!(Store(mem_ref!(M64), rt)),
 
                 _ => error!("unknown opcode 0x{:x} ({0})", op),
             }
