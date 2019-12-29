@@ -1,8 +1,8 @@
 use sobek::explore::Explorer;
 use sobek::ir::{BitSize, Const, Cx, Platform, RawRom, SimplePlatform};
+use sobek::isa::i8051::I8051;
+use sobek::isa::i8080::I8080;
 use sobek::isa::mips::Mips32;
-use sobek::isa::_8051::_8051;
-use sobek::isa::_8080::_8080;
 use sobek::platform::n64::{self, N64};
 use std::iter;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,7 +47,7 @@ fn main() {
         "8051" => {
             analyze_and_dump(
                 SimplePlatform {
-                    isa: _8051,
+                    isa: I8051,
                     rom: RawRom {
                         big_endian: false,
                         data,
@@ -59,8 +59,8 @@ fn main() {
         "8080" => {
             analyze_and_dump(
                 SimplePlatform {
-                    isa: _8080 {
-                        flavor: sobek::isa::_8080::Flavor::Intel,
+                    isa: I8080 {
+                        flavor: sobek::isa::i8080::Flavor::Intel,
                     },
                     rom: RawRom {
                         big_endian: false,
@@ -73,8 +73,8 @@ fn main() {
         "gb" => {
             analyze_and_dump(
                 SimplePlatform {
-                    isa: _8080 {
-                        flavor: sobek::isa::_8080::Flavor::LR35902,
+                    isa: I8080 {
+                        flavor: sobek::isa::i8080::Flavor::LR35902,
                     },
                     rom: RawRom {
                         big_endian: false,

@@ -1,5 +1,3 @@
-// TODO(eddyb) use a better name for this module.
-
 use crate::ir::{
     BitSize::{self, *},
     Const, Cx, Edge, Edges, Effect, IntOp, Isa, Mem, MemRef, MemSize, Platform, Rom, State, Use,
@@ -13,7 +11,7 @@ pub enum Flavor {
     LR35902,
 }
 
-pub struct _8080 {
+pub struct I8080 {
     pub flavor: Flavor,
 }
 
@@ -73,7 +71,7 @@ impl Flavor {
     }
 }
 
-impl Isa for _8080 {
+impl Isa for I8080 {
     const ADDR_SIZE: BitSize = B16;
 
     fn default_regs(cx: &Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>> {

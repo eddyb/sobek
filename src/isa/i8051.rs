@@ -1,5 +1,3 @@
-// TODO(eddyb) use a better name for this module.
-
 use crate::ir::{
     BitSize::{self, *},
     Const, Cx, Edge, Edges, Effect, IntOp, Isa, Mem, MemRef, MemSize, Platform, Rom, State, Use,
@@ -7,7 +5,7 @@ use crate::ir::{
 };
 use std::iter;
 
-pub struct _8051;
+pub struct I8051;
 
 // FIXME(eddyb) maybe replace `Reg` with enums like these.
 enum Reg {
@@ -25,7 +23,7 @@ enum Reg {
 // FIXME(eddyb) don't make every SFR a register, if reads are not
 // "pure", e.g. they interact with I/O, they should use memory ops.
 
-impl Isa for _8051 {
+impl Isa for I8051 {
     // FIXME(eddyb) add proper support for a Harvard architecture.
     const ADDR_SIZE: BitSize = B16;
 
