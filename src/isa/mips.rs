@@ -473,10 +473,12 @@ impl Isa for Mips32 {
             }
 
             match op {
-                4 => return branch!(val!(Int(IntOp::Eq, B32, rs, rt)) => true),
-                5 => return branch!(val!(Int(IntOp::Eq, B32, rs, rt)) => false),
-                6 => return branch!(val!(Int(IntOp::LtS, B32, zero, rs)) => false),
-                7 => return branch!(val!(Int(IntOp::LtS, B32, zero, rs)) => true),
+                // FIXME(eddyb) for 20..=23, only execute the delay slot when
+                // the branch is taken (the specs talk about "nullification").
+                4 | 20 => return branch!(val!(Int(IntOp::Eq, B32, rs, rt)) => true),
+                5 | 21 => return branch!(val!(Int(IntOp::Eq, B32, rs, rt)) => false),
+                6 | 22 => return branch!(val!(Int(IntOp::LtS, B32, zero, rs)) => false),
+                7 | 23 => return branch!(val!(Int(IntOp::LtS, B32, zero, rs)) => true),
 
                 8..=14 => {
                     let op = match op {
@@ -512,6 +514,41 @@ impl Isa for Mips32 {
                 40 => state.mem = mem!(Store(mem_ref!(M8), val!(Trunc(B8, rt)))),
                 41 => state.mem = mem!(Store(mem_ref!(M16), val!(Trunc(B16, rt)))),
                 43 => state.mem = mem!(Store(mem_ref!(M32), rt)),
+
+                47 => {
+                    // FIXME(eddyb) use the result of rs+imm as an argument.
+                    return Err(Edges::One(Edge {
+                        state,
+                        effect: Effect::Opaque {
+                            call: format!(
+                                "CACHE(op={}, base={}, imm={:?})",
+                                field(16, 5),
+                                GPR_NAMES.0[field(21, 5) as usize],
+                                imm,
+                            ),
+                            next_pc: cx.a(*pc),
+                        },
+                    }));
+                }
+
+                // FIXME(eddyb) implement basic floating-point instructions.
+                49 | 53 | 57 | 61 => {
+                    // FIXME(eddyb) use the result of rs+imm as an argument.
+                    return Err(Edges::One(Edge {
+                        state,
+                        effect: Effect::Opaque {
+                            call: format!(
+                                "{}{}C1_FPU(f{}, base={}, imm={:?})",
+                                if (op & 8) == 0 { 'L' } else { 'S' },
+                                if (op & 4) == 0 { 'W' } else { 'D' },
+                                rd,
+                                GPR_NAMES.0[field(21, 5) as usize],
+                                imm
+                            ),
+                            next_pc: cx.a(*pc),
+                        },
+                    }));
+                }
 
                 55 => set_reg_maybe64!(rd, val!(Load(mem_ref!(M64)))),
                 63 => state.mem = mem!(Store(mem_ref!(M64), rt)),
