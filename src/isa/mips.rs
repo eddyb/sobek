@@ -137,21 +137,33 @@ impl Isa for Mips32 {
             ($target:expr) => {{
                 let target = $target;
                 // Process delay slot.
-                state = match Self::lift_instr(cx, pc, state) {
-                    Ok(state) => state,
+                match Self::lift_instr(cx, pc, state) {
+                    Ok(state) => Err(Edges::One(Edge {
+                        state,
+                        effect: Effect::Jump(target),
+                    })),
+                    Err(Edges::One(Edge {
+                        state,
+                        effect: Effect::Opaque { call, next_pc: _ },
+                    })) => {
+                        // HACK(eddyb) replace the `next_pc` but reuse the `Opaque`.
+                        Err(Edges::One(Edge {
+                            state,
+                            effect: Effect::Opaque {
+                                call,
+                                next_pc: target,
+                            },
+                        }))
+                    }
                     Err(edges) => {
                         let effect = cx
                             .pretty_print_on_edges(edges.as_ref().map(|e, _| &e.effect))
                             .to_string();
                         // HACK(eddyb) extract some `state` for `error!`.
                         state = edges.map(|e, _| e.state).merge(|x, _| x);
-                        error!("delay slot had effect: {}", effect);
+                        error!("jump delay slot had effect: {}", effect);
                     }
-                };
-                Err(Edges::One(Edge {
-                    state,
-                    effect: Effect::Jump(target),
-                }))
+                }
             }};
         }
         macro_rules! branch_target {
@@ -173,22 +185,46 @@ impl Isa for Mips32 {
                 assert_eq!(cx[cond].size(), B1);
 
                 // Process delay slot.
-                state = match Self::lift_instr(cx, pc, state) {
-                    Ok(state) => state,
+                match Self::lift_instr(cx, pc, state) {
+                    Ok(state) => Err(Edges::Branch {
+                        cond,
+                        t: Edge { state: state.clone(), effect: Effect::Jump(t) },
+                        e: Edge { state, effect: Effect::Jump(e) },
+                    }),
+                    Err(Edges::One(Edge {
+                        state,
+                        effect: Effect::Opaque { call, next_pc: _ },
+                    })) => {
+                        // HACK(eddyb) replace the `next_pc` but reuse the `Opaque`.
+                        // NOTE(eddyb) this is even worse than the `jump!` one,
+                        // because it duplicates the `Opaque`.
+                        Err(Edges::Branch {
+                            cond,
+                            t: Edge {
+                                state: state.clone(),
+                                effect: Effect::Opaque {
+                                    call: call.clone(),
+                                    next_pc: t,
+                                },
+                            },
+                            e: Edge {
+                                state,
+                                effect: Effect::Opaque {
+                                    call,
+                                    next_pc: e,
+                                },
+                            },
+                        })
+                    }
                     Err(edges) => {
                         let effect = cx.pretty_print_on_edges(
                             edges.as_ref().map(|e, _| &e.effect),
                         ).to_string();
                         // HACK(eddyb) extract some `state` for `error!`.
                         state = edges.map(|e, _| e.state).merge(|x, _| x);
-                        error!("delay slot had effect: {}", effect);
+                        error!("branch delay slot had effect: {}", effect);
                     }
-                };
-                Err(Edges::Branch {
-                    cond,
-                    t: Edge { state: state.clone(), effect: Effect::Jump(t) },
-                    e: Edge { state: state, effect: Effect::Jump(e) },
-                })
+                }
             }};
             ($cond:expr => $b:expr) => {
                 branch!($cond => $b, branch_target!(), cx.a(add4(*pc)))
@@ -199,20 +235,18 @@ impl Isa for Mips32 {
             // SPECIAL (R format and syscall/break).
             let funct = field(0, 6);
             match funct {
-                12 => {
+                12 | 13 => {
                     return Err(Edges::One(Edge {
                         state,
-                        effect: Effect::PlatformCall {
-                            code: field(6, 20),
-                            ret_pc: cx.a(*pc),
+                        effect: Effect::Opaque {
+                            call: format!(
+                                "{}(code={})",
+                                if funct == 12 { "syscall" } else { "break" },
+                                field(6, 20)
+                            ),
+                            next_pc: cx.a(*pc),
                         },
                     }));
-                }
-                13 => {
-                    return Err(Edges::One(Edge {
-                        state,
-                        effect: Effect::Trap { code: field(6, 20) },
-                    }))
                 }
                 _ => {}
             }
@@ -281,18 +315,32 @@ impl Isa for Mips32 {
             // COPz.
             let cp = op - 16;
             let funct = field(0, 6);
-            // FIXME(eddyb) use something like `PlatformCall` here to represent
-            // the instruction opaquely.
+            // FIXME(eddyb) implement basic floating-point instructions.
             if cp == 1 {
-                error!(
-                    "unknown COP1 (FPU), rs={}, rt={}, rd={}, funct={}",
-                    rs, rt, rd, funct
-                );
+                return Err(Edges::One(Edge {
+                    state,
+                    effect: Effect::Opaque {
+                        call: format!("COP1_FPU(rs={}, rt={}, rd={}, funct={})", rs, rt, rd, funct),
+                        next_pc: cx.a(*pc),
+                    },
+                }));
             }
-            error!(
-                "unknown COP{}, rs={}, rt={}, rd={}, funct={}",
-                cp, rs, rt, rd, funct,
-            );
+
+            // FIXME(eddyb) ssupport EPC, moves to/from it, and ERET.
+            if cp == 0 && rs == 16 && funct == 24 {
+                error!("ERET");
+            }
+
+            return Err(Edges::One(Edge {
+                state,
+                effect: Effect::Opaque {
+                    call: format!(
+                        "COP{}(rs={}, rt={}, rd={}, funct={})",
+                        cp, rs, rt, rd, funct,
+                    ),
+                    next_pc: cx.a(*pc),
+                },
+            }));
         } else {
             // I format.
             let rd = rt;

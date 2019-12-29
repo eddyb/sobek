@@ -1071,24 +1071,18 @@ impl Use<Mem> {
 pub enum Effect {
     Jump(Use<Val>),
 
-    PlatformCall { code: u32, ret_pc: Use<Val> },
-    Trap { code: u32 },
+    // FIXME(eddyb) support this better, add Val/Mem args, etc.
+    Opaque { call: String, next_pc: Use<Val> },
 
     Error(String),
 }
 
 impl fmt::Debug for Effect {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
+        match self {
             Effect::Jump(target) => write!(f, "jump({:?})", target),
-            Effect::PlatformCall { code, ret_pc } => write!(
-                f,
-                "platform_call({:?}) -> {:?}",
-                Const::new(BitSize::B32, code as u64),
-                ret_pc
-            ),
-            Effect::Trap { code } => write!(f, "trap({})", code),
-            Effect::Error(ref msg) => write!(f, "error({:?})", msg),
+            Effect::Opaque { call, next_pc } => write!(f, "{} -> {:?}", call, next_pc),
+            Effect::Error(msg) => write!(f, "error({:?})", msg),
         }
     }
 }
@@ -1096,10 +1090,13 @@ impl fmt::Debug for Effect {
 impl Visit for Effect {
     fn walk(&self, visitor: &mut impl Visitor) {
         match *self {
-            Effect::Jump(target) | Effect::PlatformCall { ret_pc: target, .. } => {
+            Effect::Jump(target)
+            | Effect::Opaque {
+                next_pc: target, ..
+            } => {
                 visitor.visit_val_use(target);
             }
-            Effect::Trap { .. } | Effect::Error(_) => {}
+            Effect::Error(_) => {}
         }
     }
 }

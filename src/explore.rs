@@ -259,8 +259,11 @@ impl<'a, P: Platform> Explorer<'a, P> {
             .edges
             .as_ref()
             .map(|e, _| match e.effect {
-                Effect::Jump(target) | Effect::PlatformCall { ret_pc: target, .. } => Some(target),
-                Effect::Trap { .. } | Effect::Error(_) => None,
+                Effect::Jump(target)
+                | Effect::Opaque {
+                    next_pc: target, ..
+                } => Some(target),
+                Effect::Error(_) => None,
             });
         let mut exit_from_target = |direct_target: Use<Val>, br_cond: Option<bool>| {
             let direct_target = direct_target.subst_reduce(self.cx, None);
