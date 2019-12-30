@@ -1,5 +1,6 @@
 use crate::explore::{BlockId, Explorer};
 use crate::ir::{Edges, Effect, Val, Visit, Visitor};
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::iter;
@@ -19,38 +20,60 @@ pub struct Nester<'a, P> {
 
 impl<'a, P> Nester<'a, P> {
     pub fn new(explorer: &'a Explorer<'a, P>) -> Self {
-        let cx = explorer.cx;
-
         let mut nester = Nester {
             explorer,
             ref_counts: HashMap::new(),
         };
 
-        for (&bb, block) in &explorer.blocks {
-            let mut add_target = |target| {
-                // Ignore self-loop backedges, as they would always
-                // prevent nesting the loop for no good reason.
-                if target != bb {
-                    *nester.ref_counts.entry(target).or_default() += 1;
-                }
-            };
-            block.edges.as_ref().map(|e, _| match e.effect {
-                Effect::Jump(target)
-                | Effect::Opaque {
-                    next_pc: target, ..
-                } => {
-                    if let Some(target) = cx[target].as_const().map(BlockId::from) {
-                        add_target(target);
-                    }
-                }
-                Effect::Error(_) => {}
-            });
-            if let Some(&target_bb) = explorer.eventual_static_continuation.get(&bb) {
-                add_target(target_bb);
-            }
+        let mut seen = HashMap::new();
+        for &bb in explorer.blocks.keys() {
+            nester.compute_ref_counts(bb, &mut seen);
         }
 
         nester
+    }
+
+    /// Gather all the ref counts in the sub-CFG statically reachable from `bb`,
+    /// taking care not to count backedges, as they would always prevent nesting
+    /// the loops they're in, for no good reason.
+    fn compute_ref_counts(&mut self, bb: BlockId, seen: &mut HashMap<BlockId, bool>) {
+        // Avoid counting any block's targets more than once.
+        match seen.entry(bb) {
+            Entry::Occupied(_) => return,
+            Entry::Vacant(entry) => {
+                // HACK(eddyb) use `seen[bb] == false` as an indicator that `bb`
+                // is an ancestor in the CFG being reached from it.
+                entry.insert(false);
+            }
+        }
+
+        let explorer = self.explorer;
+        let block = &explorer.blocks[&bb];
+
+        let mut add_target = |target| {
+            // Ignore loop backedges, using `seen[target] == false` as an
+            // indicator that `target` is an ancestor in the CFG.
+            if seen.get(&target) != Some(&false) {
+                *self.ref_counts.entry(target).or_default() += 1;
+                self.compute_ref_counts(target, seen);
+            }
+        };
+        block.edges.as_ref().map(|e, _| match e.effect {
+            Effect::Jump(target)
+            | Effect::Opaque {
+                next_pc: target, ..
+            } => {
+                if let Some(target) = explorer.cx[target].as_const().map(BlockId::from) {
+                    add_target(target);
+                }
+            }
+            Effect::Error(_) => {}
+        });
+        if let Some(&target_bb) = explorer.eventual_static_continuation.get(&bb) {
+            add_target(target_bb);
+        }
+
+        seen.insert(bb, true);
     }
 
     pub fn all_nested_blocks(&self) -> Vec<NestedBlock> {
