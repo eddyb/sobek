@@ -27,21 +27,27 @@ impl<'a, P> Nester<'a, P> {
         };
 
         for (&bb, block) in &explorer.blocks {
+            let mut add_target = |target| {
+                // Ignore self-loop backedges, as they would always
+                // prevent nesting the loop for no good reason.
+                if target != bb {
+                    *nester.ref_counts.entry(target).or_default() += 1;
+                }
+            };
             block.edges.as_ref().map(|e, _| match e.effect {
                 Effect::Jump(target)
                 | Effect::Opaque {
                     next_pc: target, ..
                 } => {
                     if let Some(target) = cx[target].as_const().map(BlockId::from) {
-                        // Ignore self-loop backedges, as they would always
-                        // prevent nesting the loop for no good reason.
-                        if target != bb {
-                            *nester.ref_counts.entry(target).or_default() += 1;
-                        }
+                        add_target(target);
                     }
                 }
                 Effect::Error(_) => {}
             });
+            if let Some(&target_bb) = explorer.eventual_static_continuation.get(&bb) {
+                add_target(target_bb);
+            }
         }
 
         nester
@@ -120,6 +126,13 @@ impl<'a, P> Nester<'a, P> {
                         .is_none());
                 }
                 None => children.push(child),
+            }
+        }
+
+        // Include any targets that could be the return from a call.
+        if let Some(&target_bb) = self.explorer.eventual_static_continuation.get(&bb) {
+            if target_bb > bb {
+                *forward_exits.entry(target_bb).or_default() += 1;
             }
         }
 

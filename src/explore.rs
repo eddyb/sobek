@@ -199,6 +199,10 @@ pub struct Explorer<'a, P> {
     pub cx: &'a Cx<P>,
     pub blocks: BTreeMap<BlockId, Block>,
 
+    /// Analysis output indicating that a block will eventually reach
+    /// another block, e.g. calls reaching the return "continuation".
+    pub eventual_static_continuation: HashMap<BlockId, BlockId>,
+
     cancel_token: Option<&'a AtomicBool>,
 
     exit_cache: HashMap<(BlockId, ExitOptions), Exit>,
@@ -209,6 +213,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
         Explorer {
             cx,
             blocks: BTreeMap::new(),
+            eventual_static_continuation: HashMap::new(),
             cancel_token,
             exit_cache: HashMap::new(),
         }
@@ -277,6 +282,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
                 // Split overlapping blocks by discarding and re-lifting them.
                 if bb.contains(&next.start) {
                     self.blocks.remove(&bb.start);
+                    self.eventual_static_continuation.remove(&bb.start);
                     self.get_or_lift_block(bb.start);
                 }
 
@@ -324,6 +330,10 @@ impl<'a, P: Platform> Explorer<'a, P> {
                 if let Set1::One(Some(target_bb)) =
                     targets.map(|target| self.cx[target].as_const().map(BlockId::from))
                 {
+                    // HACK(eddyb) save the observed value without accounting
+                    // for multiple possible values etc.
+                    self.eventual_static_continuation.insert(bb, target_bb);
+
                     // FIXME(eddyb) abstract this better wrt `Exit` / `partial`.
 
                     // Recurse on the indirect target.
