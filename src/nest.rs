@@ -106,7 +106,7 @@ impl<'a, P> Nester<'a, P> {
 
             if blocks.peek().map(|&(bb, _)| bb) != Some(target) || self.ref_counts[&target] > 1 {
                 *forward_exits.entry(target).or_default() += 1;
-                break;
+                continue;
             }
 
             let child = self.nested_block_from_blocks(blocks);
