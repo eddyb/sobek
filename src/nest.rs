@@ -128,8 +128,8 @@ impl<'a, P> Nester<'a, P> {
         let mut forward_exits = BTreeMap::new();
 
         for (target, br_cond) in edge_targets.iter().copied().flatten() {
-            // Don't stop if we see a backwards jump, but also don't nest it.
-            if target <= bb {
+            // Don't nest backwards jumps, or jumps that look like functions.
+            if target <= bb || self.explorer.takes_static_continuation.contains(&target) {
                 continue;
             }
 
@@ -166,6 +166,11 @@ impl<'a, P> Nester<'a, P> {
                 None => break,
             };
             if count < self.ref_counts.get(&next_bb).copied().unwrap_or(0) {
+                break;
+            }
+
+            // Don't nest exit targets that look like functions.
+            if self.explorer.takes_static_continuation.contains(&next_bb) {
                 break;
             }
 

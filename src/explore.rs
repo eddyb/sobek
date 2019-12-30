@@ -3,7 +3,7 @@ use crate::ir::{
     State, Use, Val, Visit, Visitor,
 };
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fmt, mem};
 
@@ -199,8 +199,13 @@ pub struct Explorer<'a, P> {
     pub cx: &'a Cx<P>,
     pub blocks: BTreeMap<BlockId, Block>,
 
-    /// Analysis output indicating that a block will eventually reach
-    /// another block, e.g. calls reaching the return "continuation".
+    /// Analysis output indicating that a block takes a "continuation" which is
+    /// static in some ancestors, e.g. callees taking the return "continuation".
+    pub takes_static_continuation: HashSet<BlockId>,
+
+    /// Analysis output indicating that a block will eventually reach another
+    /// block by going through some sub-CFG that takes a "continuation",
+    /// e.g. calls reaching the return "continuation".
     pub eventual_static_continuation: HashMap<BlockId, BlockId>,
 
     cancel_token: Option<&'a AtomicBool>,
@@ -213,6 +218,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
         Explorer {
             cx,
             blocks: BTreeMap::new(),
+            takes_static_continuation: HashSet::new(),
             eventual_static_continuation: HashMap::new(),
             cancel_token,
             exit_cache: HashMap::new(),
@@ -330,6 +336,7 @@ impl<'a, P: Platform> Explorer<'a, P> {
                 if let Set1::One(Some(target_bb)) =
                     targets.map(|target| self.cx[target].as_const().map(BlockId::from))
                 {
+                    self.takes_static_continuation.insert(direct_target_bb);
                     // HACK(eddyb) save the observed value without accounting
                     // for multiple possible values etc.
                     self.eventual_static_continuation.insert(bb, target_bb);
