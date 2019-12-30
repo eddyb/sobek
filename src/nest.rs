@@ -1,8 +1,9 @@
 use crate::explore::{BlockId, Explorer};
-use crate::ir::{Edges, Effect, Visit, Visitor};
+use crate::ir::{Edges, Effect, Val, Visit, Visitor};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::iter;
+use std::mem;
 
 pub struct NestedBlock {
     bb: BlockId,
@@ -168,9 +169,25 @@ impl<'a, P> Nester<'a, P> {
 
         let bb = nested_block.bb;
 
-        let edges = self.explorer.blocks[&bb].edges.as_ref().map(|e, br_cond| {
+        // HACK(eddyb) sort branch edges if both have children.
+        let mut edges = self.explorer.blocks[&bb].edges.as_ref();
+        let mut per_edge_child = [
+            nested_block.per_edge_child[0].as_ref(),
+            nested_block.per_edge_child[1].as_ref(),
+        ];
+        if let [Some(e_child), Some(t_child)] = &mut per_edge_child {
+            if t_child.bb > e_child.bb {
+                if let Edges::Branch { cond, t, e } = &mut edges {
+                    mem::swap(t_child, e_child);
+                    mem::swap(t, e);
+                    *cond = self.explorer.cx.a(Val::bit_not(*cond));
+                }
+            }
+        }
+
+        let edges = edges.map(|e, br_cond| {
             let suffix = br_cond
-                .and_then(|i| nested_block.per_edge_child[i as usize].as_ref())
+                .and_then(|i| per_edge_child[i as usize].as_ref())
                 .map_or(String::new(), |child| {
                     format!(
                         "\n        {}",
