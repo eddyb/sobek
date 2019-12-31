@@ -6,16 +6,17 @@ use std::fmt;
 use std::iter;
 use std::mem;
 
-pub struct NestedBlock {
-    bb: BlockId,
-    per_edge_child: [Option<Box<NestedBlock>>; 2],
-    children: Vec<NestedBlock>,
+struct NestedBlock {
+    per_edge_child: [Option<BlockId>; 2],
+    children: Vec<BlockId>,
     forward_exits: BTreeMap<BlockId, usize>,
 }
 
 pub struct Nester<'a, P> {
     pub explorer: &'a Explorer<'a, P>,
     ref_counts: HashMap<BlockId, usize>,
+
+    nested_block_cache: HashMap<BlockId, NestedBlock>,
 }
 
 impl<'a, P> Nester<'a, P> {
@@ -23,6 +24,7 @@ impl<'a, P> Nester<'a, P> {
         let mut nester = Nester {
             explorer,
             ref_counts: HashMap::new(),
+            nested_block_cache: HashMap::new(),
         };
 
         let mut seen = HashMap::new();
@@ -76,9 +78,10 @@ impl<'a, P> Nester<'a, P> {
         seen.insert(bb, true);
     }
 
-    pub fn all_nested_blocks(&self) -> Vec<NestedBlock> {
-        let mut nested_blocks = vec![];
+    pub fn root_nested_blocks(&mut self) -> Vec<BlockId> {
+        let mut root_blocks = vec![];
 
+        let cx = self.explorer.cx;
         let mut blocks = self
             .explorer
             .blocks
@@ -90,25 +93,27 @@ impl<'a, P> Nester<'a, P> {
                         Effect::Jump(target)
                         | Effect::Opaque {
                             next_pc: target, ..
-                        } => self.explorer.cx[target].as_const().map(BlockId::from),
+                        } => cx[target].as_const().map(BlockId::from),
                         Effect::Error(_) => None,
                     }),
                 )
             })
             .peekable();
 
-        while blocks.peek().is_some() {
-            nested_blocks.push(self.nested_block_from_blocks(&mut blocks));
+        while let Some(&(bb, _)) = blocks.peek() {
+            self.compute_nested_block(&mut blocks);
+            root_blocks.push(bb);
         }
 
-        nested_blocks
+        root_blocks
     }
 
-    fn nested_block_from_blocks(
-        &self,
+    fn compute_nested_block(
+        &mut self,
         blocks: &mut iter::Peekable<impl Iterator<Item = (BlockId, Edges<Option<BlockId>>)>>,
-    ) -> NestedBlock {
+    ) {
         let (bb, edge_targets) = blocks.next().unwrap();
+        assert!(!self.nested_block_cache.contains_key(&bb));
 
         let edge_targets = match edge_targets {
             Edges::One(target) => [target.map(|x| (x, None)), None],
@@ -138,17 +143,16 @@ impl<'a, P> Nester<'a, P> {
                 continue;
             }
 
-            let child = self.nested_block_from_blocks(blocks);
+            self.compute_nested_block(blocks);
+            let child = &self.nested_block_cache[&target];
             for (&child_exit, &count) in &child.forward_exits {
                 *forward_exits.entry(child_exit).or_default() += count;
             }
             match br_cond {
                 Some(i) => {
-                    assert!(per_edge_child[i as usize]
-                        .replace(Box::new(child))
-                        .is_none());
+                    assert!(per_edge_child[i as usize].replace(target).is_none());
                 }
-                None => children.push(child),
+                None => children.push(target),
             }
         }
 
@@ -176,23 +180,26 @@ impl<'a, P> Nester<'a, P> {
 
             forward_exits.remove(&next_bb);
 
-            let child = self.nested_block_from_blocks(blocks);
+            self.compute_nested_block(blocks);
+            let child = &self.nested_block_cache[&next_bb];
             for (&child_exit, &count) in &child.forward_exits {
                 *forward_exits.entry(child_exit).or_default() += count;
             }
-            children.push(child);
+            children.push(next_bb);
         }
 
-        NestedBlock {
+        self.nested_block_cache.insert(
             bb,
-            per_edge_child,
-            children,
-            forward_exits,
-        }
+            NestedBlock {
+                per_edge_child,
+                children,
+                forward_exits,
+            },
+        );
     }
 
     // FIXME(eddyb) do this without allocating temporary `String`s.
-    pub fn nested_block_to_string(&self, nested_block: &NestedBlock) -> String {
+    pub fn nested_block_to_string(&self, bb: BlockId) -> String {
         struct WithSuffix<T>(T, String);
 
         impl<T: Visit> Visit for WithSuffix<T> {
@@ -208,16 +215,16 @@ impl<'a, P> Nester<'a, P> {
             }
         }
 
-        let bb = nested_block.bb;
+        let nested_block = &self.nested_block_cache[&bb];
 
         // HACK(eddyb) sort branch edges if both have children.
         let mut edges = self.explorer.blocks[&bb].edges.as_ref();
         let mut per_edge_child = [
-            nested_block.per_edge_child[0].as_ref(),
-            nested_block.per_edge_child[1].as_ref(),
+            nested_block.per_edge_child[0],
+            nested_block.per_edge_child[1],
         ];
         if let [Some(e_child), Some(t_child)] = &mut per_edge_child {
-            if t_child.bb > e_child.bb {
+            if t_child > e_child {
                 if let Edges::Branch { cond, t, e } = &mut edges {
                     mem::swap(t_child, e_child);
                     mem::swap(t, e);
@@ -227,15 +234,16 @@ impl<'a, P> Nester<'a, P> {
         }
 
         let edges = edges.map(|e, br_cond| {
-            let suffix = br_cond
-                .and_then(|i| per_edge_child[i as usize].as_ref())
-                .map_or(String::new(), |child| {
-                    format!(
-                        "\n        {}",
-                        self.nested_block_to_string(child)
-                            .replace("\n", "\n        ")
-                    )
-                });
+            let suffix =
+                br_cond
+                    .and_then(|i| per_edge_child[i as usize])
+                    .map_or(String::new(), |child| {
+                        format!(
+                            "\n        {}",
+                            self.nested_block_to_string(child)
+                                .replace("\n", "\n        ")
+                        )
+                    });
             (&e.state, WithSuffix(&e.effect, suffix))
         });
 
@@ -254,7 +262,7 @@ impl<'a, P> Nester<'a, P> {
                 body += "\n";
             }
 
-            for child in &nested_block.children {
+            for &child in &nested_block.children {
                 body += "    ";
                 body += &self.nested_block_to_string(child).replace("\n", "\n    ");
                 body += "\n";

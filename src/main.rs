@@ -32,9 +32,9 @@ fn analyze_and_dump<P: Platform>(platform: P, entries: impl Iterator<Item = Cons
 
     explorer.split_overlapping_bbs();
 
-    let nester = sobek::nest::Nester::new(&explorer);
-    for nested_block in nester.all_nested_blocks() {
-        println!("{}", nester.nested_block_to_string(&nested_block));
+    let mut nester = sobek::nest::Nester::new(&explorer);
+    for bb in nester.root_nested_blocks() {
+        println!("{}", nester.nested_block_to_string(bb));
     }
 }
 
