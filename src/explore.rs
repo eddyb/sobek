@@ -181,18 +181,6 @@ impl Exit {
             partial: self.partial.or(other.partial),
         }
     }
-
-    fn subst<P: Platform>(self, cx: &Cx<P>, base: &State) -> Self {
-        Exit {
-            targets: self
-                .targets
-                .map(|target| target.subst_reduce(cx, Some(base))),
-            arg_values: self
-                .arg_values
-                .map(|arg_value| arg_value.subst_reduce(cx, Some(base))),
-            partial: self.partial,
-        }
-    }
 }
 
 pub struct Explorer<'a, P> {
@@ -310,148 +298,132 @@ impl<'a, P: Platform> Explorer<'a, P> {
         });
     }
 
-    fn find_exit_uncached(&mut self, bb: BlockId, options: ExitOptions) -> Exit {
-        let edge_targets = self
+    fn find_exit_uncached_on_edge(
+        &mut self,
+        bb: BlockId,
+        options: ExitOptions,
+        br_cond: Option<bool>,
+    ) -> Exit {
+        let mut exit = match self
             .get_or_lift_block(bb)
             .edges
             .as_ref()
-            .map(|e, _| match e.effect {
-                Effect::Jump(target)
-                | Effect::Opaque {
-                    next_pc: target, ..
-                } => Some(target),
-                Effect::Error(_) => None,
-            });
-        let mut exit_from_target = |direct_target: Use<Val>, br_cond: Option<bool>| {
-            let direct_target = direct_target.subst_reduce(self.cx, None);
-            if let Some(direct_target_bb) = self.cx[direct_target].as_const().map(BlockId::from) {
-                let Exit {
-                    mut targets,
-                    mut arg_values,
-                    mut partial,
-                } = self
-                    .find_exit(direct_target_bb, options)
-                    .subst(self.cx, &self.blocks[&bb].edges.as_ref().get(br_cond).state);
-
-                if let Set1::One(Some(target_bb)) =
-                    targets.map(|target| self.cx[target].as_const().map(BlockId::from))
-                {
-                    self.takes_static_continuation.insert(direct_target_bb);
-                    // HACK(eddyb) save the observed value without accounting
-                    // for multiple possible values etc.
-                    self.eventual_static_continuation.insert(bb, target_bb);
-
-                    // FIXME(eddyb) abstract this better wrt `Exit` / `partial`.
-
-                    // Recurse on the indirect target.
-                    let target_exit = self.find_exit(target_bb, options);
-                    partial = partial.or(target_exit.partial);
-
-                    if let Set1::One(target_target) = target_exit.targets {
-                        if self.cx[target_target].as_const().is_some() {
-                            // FIXME(eddyb) continuing after this point is probably wrong.
-                            println!(
-                                "explore: {:?} -> {:?} reached unexpected constant {}/{}",
-                                bb,
-                                direct_target_bb,
-                                self.cx.pretty_print(&target_exit.targets),
-                                self.cx.pretty_print(&target_exit.arg_values)
-                            );
-                        }
-                    }
-
-                    let mut resolve_values = |values: Set1<Use<Val>>| {
-                        values.flat_map(|value| {
-                            // Constants don't need any propagation work.
-                            if self.cx[value].as_const().is_some() {
-                                return Set1::One(value);
-                            }
-
-                            // Reuse the already computed `arg_values` where possible.
-                            if Some(value) == options.arg_value {
-                                return arg_values;
-                            }
-
-                            let exit = self
-                                .find_exit(
-                                    direct_target_bb,
-                                    ExitOptions {
-                                        arg_value: Some(value),
-                                    },
-                                )
-                                .subst(
-                                    self.cx,
-                                    &self.blocks[&bb].edges.as_ref().get(br_cond).state,
-                                );
-                            partial = partial.take().or(exit.partial);
-                            exit.arg_values
-                        })
-                    };
-                    targets = resolve_values(target_exit.targets);
-                    arg_values = resolve_values(target_exit.arg_values);
-
-                    if let Set1::One(Some(final_target_bb)) =
-                        targets.map(|target| self.cx[target].as_const().map(BlockId::from))
-                    {
-                        // HACK(eddyb) detect trivial fixpoints/cycles.
-                        // TODO(eddyb) actually implement proper cycle-aware
-                        // support for consecutive "trampolining" exits.
-                        if target_bb == final_target_bb {
-                            let arg_values_is_const = match arg_values {
-                                Set1::Empty | Set1::Many => true,
-                                Set1::One(value) => self.cx[value].as_const().is_some(),
-                            };
-                            if arg_values_is_const {
-                                return Exit {
-                                    targets: Set1::Empty,
-                                    arg_values,
-                                    partial,
-                                };
-                            }
-                        }
-
-                        // FIXME(eddyb) continuing after this point is probably wrong.
-                        println!(
-                            "explore: {:?} -> {:?} reaches {:?}/{} and then also {:?}/{}",
-                            bb,
-                            direct_target_bb,
-                            target_bb,
-                            self.cx.pretty_print(&target_exit.arg_values),
-                            final_target_bb,
-                            self.cx.pretty_print(&arg_values)
-                        );
-                    }
-                }
-
-                Exit {
-                    targets,
-                    arg_values,
-                    partial,
-                }
-            } else {
-                Exit {
-                    targets: Set1::One(direct_target),
-                    arg_values: options.arg_value.map_or(Set1::Empty, |arg_value| {
-                        Set1::One(arg_value.subst_reduce(
-                            self.cx,
-                            Some(&self.blocks[&bb].edges.as_ref().get(br_cond).state),
-                        ))
-                    }),
+            .get(br_cond)
+            .effect
+        {
+            Effect::Jump(direct_target)
+            | Effect::Opaque {
+                next_pc: direct_target,
+                ..
+            } => Exit {
+                targets: Set1::One(direct_target.subst_reduce(self.cx, None)),
+                arg_values: options.arg_value.map_or(Set1::Empty, |arg_value| {
+                    Set1::One(arg_value.subst_reduce(
+                        self.cx,
+                        Some(&self.blocks[&bb].edges.as_ref().get(br_cond).state),
+                    ))
+                }),
+                partial: None,
+            },
+            Effect::Error(_) => {
+                return Exit {
+                    targets: Set1::Empty,
+                    arg_values: Set1::Empty,
                     partial: None,
                 }
             }
         };
+
+        // HACK(eddyb) this uses a stack of targets to be able to handle a chain
+        // of exit continuations, all resolved by `bb` simultaneously.
+        // This can happen when e.g. there is a call in between a jump table
+        // and a constant input to the jump table: the call will be the first
+        // entry in the stack, followed by the jump table.
+        let mut stack = vec![];
+        loop {
+            let target_bb = match exit
+                .targets
+                .map(|target| self.cx[target].as_const().map(BlockId::from))
+            {
+                Set1::One(Some(target_bb)) => target_bb,
+                _ => return exit,
+            };
+
+            // HACK(eddyb) detect trivial fixpoints/cycles.
+            if stack.last() == Some(&target_bb) {
+                let arg_values_is_const = match exit.arg_values {
+                    Set1::Empty | Set1::Many => true,
+                    Set1::One(value) => self.cx[value].as_const().is_some(),
+                };
+                if arg_values_is_const {
+                    exit.targets = Set1::Empty;
+                    return exit;
+                }
+            }
+
+            if let [prev_target_bb] = stack[..] {
+                self.takes_static_continuation.insert(prev_target_bb);
+                // HACK(eddyb) save the observed value without accounting
+                // for multiple possible values etc.
+                self.eventual_static_continuation.insert(bb, target_bb);
+            }
+
+            // Recurse on the current target.
+            let target_exit = self.find_exit(target_bb, options);
+            // FIXME(eddyb) abstract composing `partial`s better.
+            exit.partial = exit.partial.or(target_exit.partial);
+            let mut resolve_values = |values: Set1<Use<Val>>| {
+                values.flat_map(|value| {
+                    // Constants don't need any propagation work.
+                    if self.cx[value].as_const().is_some() {
+                        return Set1::One(value);
+                    }
+
+                    // Reuse the already computed `arg_values` where possible.
+                    if Some(value) == options.arg_value {
+                        return exit.arg_values;
+                    }
+
+                    let mut values = Set1::One(value);
+                    for &frame_bb in stack.iter().rev() {
+                        values = values.flat_map(|value| {
+                            let frame_exit = self.find_exit(
+                                frame_bb,
+                                ExitOptions {
+                                    arg_value: Some(value),
+                                },
+                            );
+                            exit.partial = exit.partial.take().or(frame_exit.partial);
+                            frame_exit.arg_values
+                        });
+                    }
+                    values.map(|arg_value| {
+                        arg_value.subst_reduce(
+                            self.cx,
+                            Some(&self.blocks[&bb].edges.as_ref().get(br_cond).state),
+                        )
+                    })
+                })
+            };
+
+            let (targets, arg_values) = (
+                resolve_values(target_exit.targets),
+                resolve_values(target_exit.arg_values),
+            );
+            exit.targets = targets;
+            exit.arg_values = arg_values;
+
+            stack.push(target_bb);
+        }
+    }
+
+    fn find_exit_uncached(&mut self, bb: BlockId, options: ExitOptions) -> Exit {
+        let edges = self.get_or_lift_block(bb).edges.as_ref().map(|_, _| ());
+
         // TODO(eddyb) avoid duplicating work between the `t` and `e`
         // of a branch in `exit_from_target`, when they converge early.
-        edge_targets
-            .map(|target, br_cond| match target {
-                Some(target) => exit_from_target(target, br_cond),
-                None => Exit {
-                    targets: Set1::Empty,
-                    arg_values: Set1::Empty,
-                    partial: None,
-                },
-            })
+        edges
+            .map(|(), br_cond| self.find_exit_uncached_on_edge(bb, options, br_cond))
             .merge(|t, e| {
                 if let (Set1::One(t), Set1::One(e)) = (t.targets, e.targets) {
                     if t != e {
