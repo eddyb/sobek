@@ -81,26 +81,9 @@ impl<'a, P> Nester<'a, P> {
     pub fn root_nested_blocks(&mut self) -> Vec<BlockId> {
         let mut root_blocks = vec![];
 
-        let cx = self.explorer.cx;
-        let mut blocks = self
-            .explorer
-            .blocks
-            .iter()
-            .map(|(&bb, block)| {
-                (
-                    bb,
-                    block.edges.as_ref().map(|e, _| match e.effect {
-                        Effect::Jump(target)
-                        | Effect::Opaque {
-                            next_pc: target, ..
-                        } => cx[target].as_const().map(BlockId::from),
-                        Effect::Error(_) => None,
-                    }),
-                )
-            })
-            .peekable();
+        let mut blocks = self.explorer.blocks.keys().copied().peekable();
 
-        while let Some(&(bb, _)) = blocks.peek() {
+        while let Some(&bb) = blocks.peek() {
             self.compute_nested_block(&mut blocks);
             root_blocks.push(bb);
         }
@@ -108,13 +91,19 @@ impl<'a, P> Nester<'a, P> {
         root_blocks
     }
 
-    fn compute_nested_block(
-        &mut self,
-        blocks: &mut iter::Peekable<impl Iterator<Item = (BlockId, Edges<Option<BlockId>>)>>,
-    ) {
-        let (bb, edge_targets) = blocks.next().unwrap();
+    fn compute_nested_block(&mut self, blocks: &mut iter::Peekable<impl Iterator<Item = BlockId>>) {
+        let bb = blocks.next().unwrap();
         assert!(!self.nested_block_cache.contains_key(&bb));
 
+        let block = &self.explorer.blocks[&bb];
+
+        let edge_targets = block.edges.as_ref().map(|e, _| match e.effect {
+            Effect::Jump(target)
+            | Effect::Opaque {
+                next_pc: target, ..
+            } => self.explorer.cx[target].as_const().map(BlockId::from),
+            Effect::Error(_) => None,
+        });
         let edge_targets = match edge_targets {
             Edges::One(target) => [target.map(|x| (x, None)), None],
             Edges::Branch { cond: _, t, e } => {
@@ -138,7 +127,7 @@ impl<'a, P> Nester<'a, P> {
                 continue;
             }
 
-            if blocks.peek().map(|&(bb, _)| bb) != Some(target) || self.ref_counts[&target] > 1 {
+            if blocks.peek() != Some(&target) || self.ref_counts[&target] > 1 {
                 *forward_exits.entry(target).or_default() += 1;
                 continue;
             }
@@ -164,7 +153,7 @@ impl<'a, P> Nester<'a, P> {
         }
 
         // Also collect any merges (combined refcounts match total) as children.
-        while let Some(&(next_bb, _)) = blocks.peek() {
+        while let Some(&next_bb) = blocks.peek() {
             let count = match forward_exits.get(&next_bb) {
                 Some(&x) => x,
                 None => break,
