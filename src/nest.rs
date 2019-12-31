@@ -1,12 +1,15 @@
 use crate::explore::{BlockId, Explorer};
-use crate::ir::{Edges, Effect, Val, Visit, Visitor};
+use crate::ir::{Const, Edges, Effect, Val, Visit, Visitor};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
-use std::fmt;
+use std::fmt::{self, Write};
 use std::iter;
 use std::mem;
+use std::ops::RangeTo;
 
 struct NestedBlock {
+    pc: RangeTo<Const>,
+
     per_edge_child: [Option<BlockId>; 2],
     children: Vec<BlockId>,
     forward_exits: BTreeMap<BlockId, usize>,
@@ -117,6 +120,7 @@ impl<'a, P> Nester<'a, P> {
             }
         };
 
+        let mut pc = block.pc;
         let mut children = vec![];
         let mut per_edge_child = [None, None];
         let mut forward_exits = BTreeMap::new();
@@ -134,6 +138,7 @@ impl<'a, P> Nester<'a, P> {
 
             self.compute_nested_block(blocks);
             let child = &self.nested_block_cache[&target];
+            pc.end = child.pc.end;
             for (&child_exit, &count) in &child.forward_exits {
                 *forward_exits.entry(child_exit).or_default() += count;
             }
@@ -171,6 +176,7 @@ impl<'a, P> Nester<'a, P> {
 
             self.compute_nested_block(blocks);
             let child = &self.nested_block_cache[&next_bb];
+            pc.end = child.pc.end;
             for (&child_exit, &count) in &child.forward_exits {
                 *forward_exits.entry(child_exit).or_default() += count;
             }
@@ -180,6 +186,7 @@ impl<'a, P> Nester<'a, P> {
         self.nested_block_cache.insert(
             bb,
             NestedBlock {
+                pc,
                 per_edge_child,
                 children,
                 forward_exits,
@@ -188,7 +195,7 @@ impl<'a, P> Nester<'a, P> {
     }
 
     // FIXME(eddyb) do this without allocating temporary `String`s.
-    pub fn nested_block_to_string(&self, bb: BlockId) -> String {
+    pub fn nested_block_to_string(&self, bb: BlockId, parent_pc: &mut RangeTo<Const>) -> String {
         struct WithSuffix<T>(T, String);
 
         impl<T: Visit> Visit for WithSuffix<T> {
@@ -205,9 +212,10 @@ impl<'a, P> Nester<'a, P> {
         }
 
         let nested_block = &self.nested_block_cache[&bb];
+        let block = &self.explorer.blocks[&bb];
 
         // HACK(eddyb) sort branch edges if both have children.
-        let mut edges = self.explorer.blocks[&bb].edges.as_ref();
+        let mut edges = block.edges.as_ref();
         let mut per_edge_child = [
             nested_block.per_edge_child[0],
             nested_block.per_edge_child[1],
@@ -222,6 +230,8 @@ impl<'a, P> Nester<'a, P> {
             }
         }
 
+        let mut pc = block.pc;
+
         let edges = edges.map(|e, br_cond| {
             let suffix =
                 br_cond
@@ -229,7 +239,7 @@ impl<'a, P> Nester<'a, P> {
                     .map_or(String::new(), |child| {
                         format!(
                             "\n        {}",
-                            self.nested_block_to_string(child)
+                            self.nested_block_to_string(child, &mut pc)
                                 .replace("\n", "\n        ")
                         )
                     });
@@ -253,7 +263,9 @@ impl<'a, P> Nester<'a, P> {
 
             for &child in &nested_block.children {
                 body += "    ";
-                body += &self.nested_block_to_string(child).replace("\n", "\n    ");
+                body += &self
+                    .nested_block_to_string(child, &mut pc)
+                    .replace("\n", "\n    ");
                 body += "\n";
             }
 
@@ -261,7 +273,22 @@ impl<'a, P> Nester<'a, P> {
             body += "}";
         }
 
+        let mut s = String::new();
+
+        if parent_pc.end.as_u64() < bb.entry_pc {
+            let _ = writeln!(s, "{:?} {{", parent_pc.end);
+            let _ = writeln!(
+                s,
+                "    /* {} unanalyzed bytes */",
+                bb.entry_pc - parent_pc.end.as_u64()
+            );
+            let _ = writeln!(s, "}}");
+        }
+        parent_pc.end = nested_block.pc.end;
+
         // FIXME(eddyb) this is wasteful, avoid copying the string around like that.
-        format!("{:?} {}", bb, body)
+        let _ = write!(s, "{:?} {}", bb, body);
+
+        s
     }
 }

@@ -1,5 +1,5 @@
 use sobek::explore::Explorer;
-use sobek::ir::{BitSize, Const, Cx, Platform, RawRom, SimplePlatform};
+use sobek::ir::{BitSize, Const, Cx, Isa, Platform, RawRom, SimplePlatform};
 use sobek::isa::i8051::I8051;
 use sobek::isa::i8080::I8080;
 use sobek::isa::mips::Mips32;
@@ -33,8 +33,13 @@ fn analyze_and_dump<P: Platform>(platform: P, entries: impl Iterator<Item = Cons
     explorer.split_overlapping_bbs();
 
     let mut nester = sobek::nest::Nester::new(&explorer);
+
+    let mut pc = ..Const::new(
+        P::Isa::ADDR_SIZE,
+        explorer.blocks.keys().next().unwrap().entry_pc,
+    );
     for bb in nester.root_nested_blocks() {
-        println!("{}", nester.nested_block_to_string(bb));
+        println!("{}", nester.nested_block_to_string(bb, &mut pc));
     }
 }
 
