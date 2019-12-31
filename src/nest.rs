@@ -1,7 +1,6 @@
 use crate::explore::{BlockId, Explorer};
 use crate::ir::{Const, Edges, Effect, Val, Visit, Visitor};
 use elsa::FrozenMap;
-use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Write};
 use std::mem;
@@ -12,7 +11,7 @@ struct NestedBlock {
 
     per_edge_child: [Option<BlockId>; 2],
     children: Vec<BlockId>,
-    forward_exits: BTreeMap<BlockId, usize>,
+    static_exits: BTreeMap<BlockId, usize>,
 }
 
 pub struct Nester<'a, P> {
@@ -30,55 +29,27 @@ impl<'a, P> Nester<'a, P> {
             nested_block_cache: FrozenMap::new(),
         };
 
-        let mut seen = HashMap::new();
-        for &bb in explorer.blocks.keys() {
-            nester.compute_ref_counts(bb, &mut seen);
+        let mut refcount_target = |target| {
+            *nester.ref_counts.entry(target).or_default() += 1;
+        };
+        for (&bb, block) in &explorer.blocks {
+            block.edges.as_ref().map(|e, _| match e.effect {
+                Effect::Jump(target)
+                | Effect::Opaque {
+                    next_pc: target, ..
+                } => {
+                    if let Some(target) = explorer.cx[target].as_const().map(BlockId::from) {
+                        refcount_target(target);
+                    }
+                }
+                Effect::Error(_) => {}
+            });
+            if let Some(&target_bb) = explorer.eventual_static_continuation.get(&bb) {
+                refcount_target(target_bb);
+            }
         }
 
         nester
-    }
-
-    /// Gather all the ref counts in the sub-CFG statically reachable from `bb`,
-    /// taking care not to count backedges, as they would always prevent nesting
-    /// the loops they're in, for no good reason.
-    fn compute_ref_counts(&mut self, bb: BlockId, seen: &mut HashMap<BlockId, bool>) {
-        // Avoid counting any block's targets more than once.
-        match seen.entry(bb) {
-            Entry::Occupied(_) => return,
-            Entry::Vacant(entry) => {
-                // HACK(eddyb) use `seen[bb] == false` as an indicator that `bb`
-                // is an ancestor in the CFG being reached from it.
-                entry.insert(false);
-            }
-        }
-
-        let explorer = self.explorer;
-        let block = &explorer.blocks[&bb];
-
-        let mut add_target = |target| {
-            // Ignore loop backedges, using `seen[target] == false` as an
-            // indicator that `target` is an ancestor in the CFG.
-            if seen.get(&target) != Some(&false) {
-                *self.ref_counts.entry(target).or_default() += 1;
-                self.compute_ref_counts(target, seen);
-            }
-        };
-        block.edges.as_ref().map(|e, _| match e.effect {
-            Effect::Jump(target)
-            | Effect::Opaque {
-                next_pc: target, ..
-            } => {
-                if let Some(target) = explorer.cx[target].as_const().map(BlockId::from) {
-                    add_target(target);
-                }
-            }
-            Effect::Error(_) => {}
-        });
-        if let Some(&target_bb) = explorer.eventual_static_continuation.get(&bb) {
-            add_target(target_bb);
-        }
-
-        seen.insert(bb, true);
     }
 
     fn get_or_compute_nested_block(&self, bb: BlockId) -> &NestedBlock {
@@ -111,11 +82,12 @@ impl<'a, P> Nester<'a, P> {
         let mut pc = block.pc;
         let mut children = vec![];
         let mut per_edge_child = [None, None];
-        let mut forward_exits = BTreeMap::new();
+        let mut static_exits = BTreeMap::new();
 
         for (target, br_cond) in edge_targets.iter().copied().flatten() {
-            // Don't nest backwards jumps, or jumps to targets that look like functions.
-            if target <= bb || self.explorer.takes_static_continuation.contains(&target) {
+            // Don't nest jumps to targets that look like functions, and don't
+            // even include them in `static_exits`.
+            if self.explorer.takes_static_continuation.contains(&target) {
                 continue;
             }
 
@@ -127,14 +99,14 @@ impl<'a, P> Nester<'a, P> {
                 .next();
 
             if next_bb != Some(target) || self.ref_counts[&target] > 1 {
-                *forward_exits.entry(target).or_default() += 1;
+                *static_exits.entry(target).or_default() += 1;
                 continue;
             }
 
             let child = self.get_or_compute_nested_block(target);
             pc.end = child.pc.end;
-            for (&child_exit, &count) in &child.forward_exits {
-                *forward_exits.entry(child_exit).or_default() += count;
+            for (&child_exit, &count) in &child.static_exits {
+                *static_exits.entry(child_exit).or_default() += count;
             }
             match br_cond {
                 Some(i) => {
@@ -147,17 +119,30 @@ impl<'a, P> Nester<'a, P> {
         // Include any targets that could be the return from a call.
         if let Some(&target_bb) = self.explorer.eventual_static_continuation.get(&bb) {
             if target_bb > bb {
-                *forward_exits.entry(target_bb).or_default() += 1;
+                *static_exits.entry(target_bb).or_default() += 1;
             }
         }
 
         // Also collect any merges (combined refcounts match total) as children.
-        while let Some((&next_bb, _)) = self.explorer.blocks.range(BlockId::from(pc.end)..).next() {
-            let count = match forward_exits.get(&next_bb) {
-                Some(&x) => x,
-                None => break,
-            };
-            if count < self.ref_counts.get(&next_bb).copied().unwrap_or(0) {
+        // This is done in two steps to allow non-loop jumps backwards within
+        // a function (e.g. backwards goto, odd codegen, or handwritten asm).
+
+        // Step 1: collect as many merges as possible, ignoring refcounts,
+        // but accumulating a best-case version of `static_exits`.
+        let mut merge_pc = pc;
+        let mut merge_static_exits = static_exits.clone();
+        let mut merge_children = vec![];
+        while let Some((&next_bb, _)) = self
+            .explorer
+            .blocks
+            .range(BlockId::from(merge_pc.end)..)
+            .next()
+        {
+            // Only stop if we're past the last reachable block.
+            // This allows some blocks to only be reached through later blocks
+            // (this is properly checked in the second step).
+            // FIXME(eddyb) perhaps optimize this?
+            if merge_static_exits.range(next_bb..).next().is_none() {
                 break;
             }
 
@@ -166,18 +151,55 @@ impl<'a, P> Nester<'a, P> {
                 break;
             }
 
-            forward_exits.remove(&next_bb);
-
             let child = self.get_or_compute_nested_block(next_bb);
-            if pc.end == child.pc.end {
+            if merge_pc.end == child.pc.end {
                 // HACK(eddyb) avoid infinite loops with 0-length children.
                 break;
             }
-            pc.end = child.pc.end;
-            for (&child_exit, &count) in &child.forward_exits {
-                *forward_exits.entry(child_exit).or_default() += count;
+            merge_pc.end = child.pc.end;
+            for (&child_exit, &count) in &child.static_exits {
+                *merge_static_exits.entry(child_exit).or_default() += count;
             }
-            children.push(next_bb);
+            merge_children.push((next_bb, child));
+        }
+
+        // Step 2: truncate `merge_children`, based on `merge_static_exits`
+        // matching the refcount, and recompute `merge_static_exits` using the
+        // truncated list. Keep repeating until `merge_children` stops changing.
+        loop {
+            let old_merge_children_count = merge_children.len();
+            let valid_merge_children = merge_children
+                .iter()
+                .take_while(|&(child_bb, _)| match merge_static_exits.get(&child_bb) {
+                    Some(&count) => count >= self.ref_counts.get(&child_bb).copied().unwrap_or(0),
+                    None => false,
+                })
+                .count();
+            merge_children.truncate(valid_merge_children);
+
+            if old_merge_children_count == merge_children.len() {
+                break;
+            }
+
+            // FIXME(eddyb) perhaps make this less expensive?
+            merge_static_exits = static_exits.clone();
+            for (_, child) in &merge_children {
+                for (&child_exit, &count) in &child.static_exits {
+                    *merge_static_exits.entry(child_exit).or_default() += count;
+                }
+            }
+        }
+
+        // Combine the above merge children into this nested block.
+        if let Some((_, child)) = merge_children.last() {
+            pc.end = child.pc.end;
+        }
+        children.extend(merge_children.into_iter().map(|(child_bb, _)| child_bb));
+        static_exits = merge_static_exits;
+
+        // Don't include any `children` in `static_exits`.
+        for &child_bb in &children {
+            static_exits.remove(&child_bb);
         }
 
         self.nested_block_cache.insert(
@@ -186,7 +208,7 @@ impl<'a, P> Nester<'a, P> {
                 pc,
                 per_edge_child,
                 children,
-                forward_exits,
+                static_exits,
             }),
         )
     }
