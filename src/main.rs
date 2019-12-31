@@ -32,14 +32,20 @@ fn analyze_and_dump<P: Platform>(platform: P, entries: impl Iterator<Item = Cons
 
     explorer.split_overlapping_bbs();
 
-    let mut nester = sobek::nest::Nester::new(&explorer);
+    let nester = sobek::nest::Nester::new(&explorer);
 
-    let mut pc = ..Const::new(
+    let mut nested_pc = ..Const::new(
         P::Isa::ADDR_SIZE,
         explorer.blocks.keys().next().unwrap().entry_pc,
     );
-    for bb in nester.root_nested_blocks() {
-        println!("{}", nester.nested_block_to_string(bb, &mut pc));
+    let mut last_end = nested_pc.end.as_u64();
+    for (&bb, block) in &explorer.blocks {
+        // Skip blocks in the last printed PC range, *unless* they overlap the
+        // previous block (e.g. due to jumps into the middle of an instruction).
+        if bb.entry_pc >= nested_pc.end.as_u64() || last_end > bb.entry_pc {
+            println!("{}", nester.nested_block_to_string(bb, &mut nested_pc));
+        }
+        last_end = block.pc.end.as_u64();
     }
 }
 

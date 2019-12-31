@@ -1,9 +1,9 @@
 use crate::explore::{BlockId, Explorer};
 use crate::ir::{Const, Edges, Effect, Val, Visit, Visitor};
+use elsa::FrozenMap;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Write};
-use std::iter;
 use std::mem;
 use std::ops::RangeTo;
 
@@ -19,7 +19,7 @@ pub struct Nester<'a, P> {
     pub explorer: &'a Explorer<'a, P>,
     ref_counts: HashMap<BlockId, usize>,
 
-    nested_block_cache: HashMap<BlockId, NestedBlock>,
+    nested_block_cache: FrozenMap<BlockId, Box<NestedBlock>>,
 }
 
 impl<'a, P> Nester<'a, P> {
@@ -27,7 +27,7 @@ impl<'a, P> Nester<'a, P> {
         let mut nester = Nester {
             explorer,
             ref_counts: HashMap::new(),
-            nested_block_cache: HashMap::new(),
+            nested_block_cache: FrozenMap::new(),
         };
 
         let mut seen = HashMap::new();
@@ -81,22 +81,10 @@ impl<'a, P> Nester<'a, P> {
         seen.insert(bb, true);
     }
 
-    pub fn root_nested_blocks(&mut self) -> Vec<BlockId> {
-        let mut root_blocks = vec![];
-
-        let mut blocks = self.explorer.blocks.keys().copied().peekable();
-
-        while let Some(&bb) = blocks.peek() {
-            self.compute_nested_block(&mut blocks);
-            root_blocks.push(bb);
+    fn get_or_compute_nested_block(&self, bb: BlockId) -> &NestedBlock {
+        if let Some(nested_block) = self.nested_block_cache.get(&bb) {
+            return nested_block;
         }
-
-        root_blocks
-    }
-
-    fn compute_nested_block(&mut self, blocks: &mut iter::Peekable<impl Iterator<Item = BlockId>>) {
-        let bb = blocks.next().unwrap();
-        assert!(!self.nested_block_cache.contains_key(&bb));
 
         let block = &self.explorer.blocks[&bb];
 
@@ -126,18 +114,24 @@ impl<'a, P> Nester<'a, P> {
         let mut forward_exits = BTreeMap::new();
 
         for (target, br_cond) in edge_targets.iter().copied().flatten() {
-            // Don't nest backwards jumps, or jumps that look like functions.
+            // Don't nest backwards jumps, or jumps to targets that look like functions.
             if target <= bb || self.explorer.takes_static_continuation.contains(&target) {
                 continue;
             }
 
-            if blocks.peek() != Some(&target) || self.ref_counts[&target] > 1 {
+            let next_bb = self
+                .explorer
+                .blocks
+                .range(BlockId::from(pc.end)..)
+                .map(|(&bb, _)| bb)
+                .next();
+
+            if next_bb != Some(target) || self.ref_counts[&target] > 1 {
                 *forward_exits.entry(target).or_default() += 1;
                 continue;
             }
 
-            self.compute_nested_block(blocks);
-            let child = &self.nested_block_cache[&target];
+            let child = self.get_or_compute_nested_block(target);
             pc.end = child.pc.end;
             for (&child_exit, &count) in &child.forward_exits {
                 *forward_exits.entry(child_exit).or_default() += count;
@@ -158,7 +152,7 @@ impl<'a, P> Nester<'a, P> {
         }
 
         // Also collect any merges (combined refcounts match total) as children.
-        while let Some(&next_bb) = blocks.peek() {
+        while let Some((&next_bb, _)) = self.explorer.blocks.range(BlockId::from(pc.end)..).next() {
             let count = match forward_exits.get(&next_bb) {
                 Some(&x) => x,
                 None => break,
@@ -174,8 +168,11 @@ impl<'a, P> Nester<'a, P> {
 
             forward_exits.remove(&next_bb);
 
-            self.compute_nested_block(blocks);
-            let child = &self.nested_block_cache[&next_bb];
+            let child = self.get_or_compute_nested_block(next_bb);
+            if pc.end == child.pc.end {
+                // HACK(eddyb) avoid infinite loops with 0-length children.
+                break;
+            }
             pc.end = child.pc.end;
             for (&child_exit, &count) in &child.forward_exits {
                 *forward_exits.entry(child_exit).or_default() += count;
@@ -185,13 +182,13 @@ impl<'a, P> Nester<'a, P> {
 
         self.nested_block_cache.insert(
             bb,
-            NestedBlock {
+            Box::new(NestedBlock {
                 pc,
                 per_edge_child,
                 children,
                 forward_exits,
-            },
-        );
+            }),
+        )
     }
 
     // FIXME(eddyb) do this without allocating temporary `String`s.
@@ -211,7 +208,7 @@ impl<'a, P> Nester<'a, P> {
             }
         }
 
-        let nested_block = &self.nested_block_cache[&bb];
+        let nested_block = self.get_or_compute_nested_block(bb);
         let block = &self.explorer.blocks[&bb];
 
         // HACK(eddyb) sort branch edges if both have children.
