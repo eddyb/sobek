@@ -120,7 +120,9 @@ impl Use<Mem> {
 impl Use<Val> {
     fn subst_reduce<P: Platform>(self, cx: &Cx<P>, base: Option<&State>) -> Self {
         let v = match cx[self] {
-            Val::InReg(r) => return base.map_or(self, |base| base.regs[r.index]),
+            Val::InReg(r) => {
+                return base.map_or(self, |base| base.regs[r.index].subst_reduce(cx, None))
+            }
 
             Val::Const(_) => return self,
 
