@@ -608,8 +608,27 @@ impl fmt::Debug for Val {
 
                 // `a - b`.
                 if let IntOp::Add = op {
-                    if let Some(('-', b)) = get_inline_val(*b).and_then(as_unop) {
-                        return write!(f, "{:?} -{} {:?}", a, size.bits_subscript(), b);
+                    if let Some(b) = get_inline_val(*b) {
+                        if let Some(b) = b.as_const() {
+                            // HACK(eddyb) assume adds are subs by constant if
+                            // the constant is small in absolute magnitude
+                            // (where "small" is less than half the bitwidth).
+                            let minus_b = b.as_i64().wrapping_neg();
+                            if 0 < minus_b && minus_b < (1 << (size.bits() / 2)) {
+                                let minus_b = Const::new(*size, minus_b as u64);
+                                return write!(
+                                    f,
+                                    "{:?} -{} {:?}",
+                                    a,
+                                    size.bits_subscript(),
+                                    minus_b
+                                );
+                            }
+                        }
+
+                        if let Some(('-', b)) = as_unop(b) {
+                            return write!(f, "{:?} -{} {:?}", a, size.bits_subscript(), b);
+                        }
                     }
                 }
 
