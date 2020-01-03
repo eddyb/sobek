@@ -625,13 +625,7 @@ impl fmt::Debug for Val {
             Val::Trunc(size, x) => write!(f, "trunc{}({:?})", size.bits_subscript(), x),
             Val::Sext(size, x) => write!(f, "sext{}({:?})", size.bits_subscript(), x),
             Val::Zext(size, x) => write!(f, "zext{}({:?})", size.bits_subscript(), x),
-            Val::Load(r) => write!(
-                f,
-                "{:?}.load{}({:?})",
-                r.mem,
-                r.size.bits_subscript(),
-                r.addr
-            ),
+            Val::Load(r) => write!(f, "{:?}[{:?}]{}", r.mem, r.addr, r.size.bits_subscript()),
         }
     }
 }
@@ -1009,10 +1003,10 @@ impl fmt::Debug for Mem {
             Mem::In => write!(f, "in.m"),
             Mem::Store(r, x) => write!(
                 f,
-                "{:?}.store{}({:?}, {:?})",
+                "{:?}[{:?}]{} <- {:?}",
                 r.mem,
-                r.size.bits_subscript(),
                 r.addr,
+                r.size.bits_subscript(),
                 x
             ),
         }
@@ -1403,11 +1397,27 @@ impl<P> Cx<P> {
                     return;
                 }
 
+                let val = self.cx[v];
+
                 let allowed_inline = mem::replace(&mut self.allow_inline, false);
-                v.walk(self);
+                match val {
+                    Val::Load(r) => {
+                        self.visit_mem_use(r.mem);
+
+                        self.allow_inline = true;
+                        self.visit_val_use(r.addr);
+                    }
+                    _ => v.walk(self),
+                }
                 self.allow_inline = allowed_inline;
 
-                let val = self.cx[v];
+                // HACK(eddyb) override `allowed_inline` for values we want to
+                // inline, but *only* if they're used exactly once.
+                let allowed_inline = match val {
+                    Val::Load(_) => true,
+                    _ => allowed_inline,
+                };
+
                 let inline = match val {
                     Val::InReg(_) | Val::Const(_) => true,
 
@@ -1430,11 +1440,21 @@ impl<P> Cx<P> {
                     return;
                 }
 
+                let mem = self.cx[m];
+
                 let allowed_inline = mem::replace(&mut self.allow_inline, false);
-                m.walk(self);
+                match mem {
+                    Mem::Store(r, x) => {
+                        self.visit_mem_use(r.mem);
+
+                        self.allow_inline = true;
+                        self.visit_val_use(r.addr);
+                        self.visit_val_use(x);
+                    }
+                    _ => m.walk(self),
+                }
                 self.allow_inline = allowed_inline;
 
-                let mem = self.cx[m];
                 let inline = match mem {
                     Mem::In => true,
                     _ => allowed_inline && self.data.use_counts.mem[&m] == 1,
