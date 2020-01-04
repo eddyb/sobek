@@ -783,6 +783,9 @@ impl Val {
                 return r.map(Val::Const);
             }
 
+            // FIXME(eddyb) clean up the naming schemes in these pattern-matches.
+            // Maybe introduce some macro to help with performing nested matches?
+
             // HACK(eddyb) replace `x + a` with `a + x` where `x` is constant.
             // See also the TODO below about sorting symmetric ops.
             if op == IntOp::Add && c_a.is_some() && c_b.is_none() {
@@ -801,18 +804,57 @@ impl Val {
                 _ => {}
             }
 
+            // HACK(eddyb) fuse `(a & x) & y` where `x` and `y` are constants.
+            match (op, cx[a], cx[b]) {
+                (IntOp::And, Val::Int(IntOp::And, _, a, b), Val::Const(y)) => {
+                    if let Val::Const(x) = cx[b] {
+                        if let Some(xy) = IntOp::And.eval(x, y) {
+                            return Val::Int(IntOp::And, size, a, cx.a(xy)).normalize(cx);
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            // Simplify `x + x` to `x << 1`.
+            if op == IntOp::Add && a == b {
+                return Val::Int(IntOp::Shl, size, a, cx.a(Const::new(BitSize::B8, 1)))
+                    .normalize(cx);
+            }
+
             // Simplify `x ^ x` to `0`.
             if op == IntOp::Xor && a == b {
                 return Ok(Val::Const(Const::new(size, 0)));
             }
 
             // HACK(eddyb) remove redundant `x & mask` where `x` has enough
-            // bits known (e.g. it's an unsigned shift right).
+            // bits known (e.g. it's an unsigned shift left/right, or zext).
             match (op, cx[a], cx[b]) {
-                (IntOp::And, Val::Int(IntOp::ShrU, _, _, shift), Val::Const(mask)) => {
-                    let all_ones = Const::new(size, size.mask());
-                    if let Val::Const(shift) = cx[shift] {
-                        if IntOp::ShrU.eval(all_ones, shift) == Some(mask) {
+                (IntOp::And, Val::Int(IntOp::Shl, ..), Val::Const(mask))
+                | (IntOp::And, Val::Int(IntOp::ShrU, ..), Val::Const(mask))
+                | (IntOp::And, Val::Zext(..), Val::Const(mask)) => {
+                    let zero = Const::new(size, 0);
+
+                    let present_bits = match cx[a] {
+                        Val::Int(shift_op @ IntOp::Shl, _, _, shift)
+                        | Val::Int(shift_op @ IntOp::ShrU, _, _, shift) => {
+                            let all_ones = Const::new(size, size.mask());
+                            cx[shift]
+                                .as_const()
+                                .and_then(|shift| shift_op.eval(all_ones, shift))
+                                .unwrap_or(all_ones)
+                        }
+
+                        Val::Zext(_, inner) => Const::new(size, cx[inner].size().mask()),
+
+                        _ => unreachable!(),
+                    };
+
+                    if let Some(masked_bits) = IntOp::And.eval(present_bits, mask) {
+                        if masked_bits == zero {
+                            return Ok(Val::Const(zero));
+                        }
+                        if masked_bits == present_bits {
                             return Err(a);
                         }
                     }
@@ -846,6 +888,20 @@ impl Val {
                             }
                         }
                     }
+                }
+                _ => {}
+            }
+
+            // HACK(eddyb) replace `(x | y) & c` with `(x & c) | (y & c)`.
+            match (op, cx[a], cx[b]) {
+                (IntOp::And, Val::Int(IntOp::Or, _, x, y), Val::Const(_)) => {
+                    return Val::Int(
+                        IntOp::Or,
+                        size,
+                        cx.a(Val::Int(IntOp::And, size, x, b)),
+                        cx.a(Val::Int(IntOp::And, size, y, b)),
+                    )
+                    .normalize(cx);
                 }
                 _ => {}
             }
