@@ -1426,6 +1426,10 @@ impl<P> Cx<P> {
                         self.allow_inline = true;
                         self.visit_val_use(r.addr);
                     }
+                    Val::Trunc(_, x) | Val::Sext(_, x) | Val::Zext(_, x) => {
+                        self.allow_inline = true;
+                        self.visit_val_use(x);
+                    }
                     _ => v.walk(self),
                 }
                 self.allow_inline = allowed_inline;
@@ -1433,7 +1437,7 @@ impl<P> Cx<P> {
                 // HACK(eddyb) override `allowed_inline` for values we want to
                 // inline, but *only* if they're used exactly once.
                 let allowed_inline = match val {
-                    Val::Load(_) => true,
+                    Val::Load(_) | Val::Trunc(..) | Val::Sext(..) | Val::Zext(..) => true,
                     _ => allowed_inline,
                 };
 
