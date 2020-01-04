@@ -166,14 +166,19 @@ mod store {
             impl fmt::Debug for Use<$k> {
                 fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
                     let local = if DBG_LOCALS.is_set() {
-                        DBG_LOCALS.with(|maps| maps.$field.get(self).cloned())
+                        DBG_LOCALS.with(|maps| maps.$field.get(self).copied())
                     } else {
                         None
                     };
                     match local {
-                        Some(Ok(i)) => write!(f, concat!($prefix, "{}"), i),
-                        Some(Err(x)) => write!(f, "{:?}", x),
-                        None => write!(f, concat!($prefix, "#{:x}"), self.idx),
+                        Some(i) => write!(f, concat!($prefix, "{}"), i),
+                        None => {
+                            if DBG_CX.is_set() {
+                                DBG_CX.with(|cx| write!(f, "{:?}", &cx[*self]))
+                            } else {
+                                write!(f, concat!($prefix, "#{:x}"), self.idx)
+                            }
+                        }
                     }
                 }
             }
@@ -184,9 +189,10 @@ mod store {
     per_kind_impls!(mem: Mem, fmt("m"));
 }
 
+scoped_thread_local!(static DBG_CX: Cx);
 scoped_thread_local!(static DBG_LOCALS: PerKind<
-    HashMap<Use<Val>, Result<usize, Val>>,
-    HashMap<Use<Mem>, Result<usize, Mem>>,
+    HashMap<Use<Val>, usize>,
+    HashMap<Use<Mem>, usize>,
 >);
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -593,8 +599,10 @@ impl fmt::Debug for Val {
             Val::Const(c) => c.fmt(f),
             Val::Int(op, size, a, b) => {
                 let get_inline_val = |v: Use<Val>| {
-                    if DBG_LOCALS.is_set() {
-                        DBG_LOCALS.with(|maps| maps.val.get(&v)?.err())
+                    let not_inline =
+                        DBG_LOCALS.is_set() && DBG_LOCALS.with(|maps| maps.val.contains_key(&v));
+                    if !not_inline && DBG_CX.is_set() {
+                        Some(DBG_CX.with(|cx| cx[v]))
                     } else {
                         None
                     }
@@ -1406,10 +1414,7 @@ impl Cx {
         struct Data {
             use_counts: PerKind<HashMap<Use<Val>, usize>, HashMap<Use<Mem>, usize>>,
             numbered_counts: PerKind<usize, usize>,
-            locals: PerKind<
-                HashMap<Use<Val>, Result<usize, Val>>,
-                HashMap<Use<Mem>, Result<usize, Mem>>,
-            >,
+            locals: PerKind<HashMap<Use<Val>, usize>, HashMap<Use<Mem>, usize>>,
             val_to_state_regs: HashMap<Use<Val>, Vec<Reg>>,
             state_mem: Option<Use<Mem>>,
         }
@@ -1489,14 +1494,11 @@ impl Cx {
 
                     _ => allowed_inline && self.data.use_counts.val[&v] == 1,
                 };
-                let local = if inline {
-                    Err(val)
-                } else {
+                if !inline {
                     let next = self.data.numbered_counts.val;
                     self.data.numbered_counts.val += 1;
-                    Ok(next)
-                };
-                self.data.locals.val.insert(v, local);
+                    self.data.locals.val.insert(v, next);
+                }
             }
             fn visit_mem_use(&mut self, m: Use<Mem>) {
                 if self.data.locals.mem.contains_key(&m) {
@@ -1522,14 +1524,11 @@ impl Cx {
                     Mem::In => true,
                     _ => allowed_inline && self.data.use_counts.mem[&m] == 1,
                 };
-                let local = if inline {
-                    Err(mem)
-                } else {
+                if !inline {
                     let next = self.data.numbered_counts.mem;
                     self.data.numbered_counts.mem += 1;
-                    Ok(next)
-                };
-                self.data.locals.mem.insert(m, local);
+                    self.data.locals.mem.insert(m, next);
+                }
             }
         }
 
@@ -1578,7 +1577,7 @@ impl Cx {
                         write_name!("{:?}", r);
                     }
                 }
-                if self.data.locals.val[&v].is_ok() {
+                if self.data.locals.val.contains_key(&v) {
                     if names < self.data.use_counts.val[&v] {
                         write_name!("{:?}", v);
                     }
@@ -1607,7 +1606,7 @@ impl Cx {
                 if Some(m) == self.data.state_mem {
                     write_name!("m");
                 }
-                if self.data.locals.mem[&m].is_ok() {
+                if self.data.locals.mem.contains_key(&m) {
                     if names < self.data.use_counts.mem[&m] {
                         write_name!("{:?}", m);
                     }
@@ -1702,7 +1701,7 @@ impl Cx {
             T: Visit + fmt::Debug,
         {
             fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                DBG_LOCALS.set(&self.data.locals, || {
+                let dbg_tls_inner_print = || {
                     // FIXME(eddyb) proper error-handling.
                     let mut printer = Printer {
                         cx: self.cx,
@@ -1769,6 +1768,9 @@ impl Cx {
                     }
 
                     Ok(())
+                };
+                DBG_CX.set(self.cx, || {
+                    DBG_LOCALS.set(&self.data.locals, dbg_tls_inner_print)
                 })
             }
         }
