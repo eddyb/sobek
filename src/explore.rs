@@ -1,6 +1,6 @@
 use crate::ir::{
-    BitSize, Block, Const, Cx, Edge, Edges, Effect, Isa, Mem, MemRef, MemSize, Platform, Rom,
-    State, Use, Val, Visit, Visitor,
+    BitSize, Block, Const, Cx, Edge, Edges, Effect, Mem, MemRef, MemSize, State, Use, Val, Visit,
+    Visitor,
 };
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -79,9 +79,9 @@ impl From<Const> for BlockId {
 
 impl Use<Mem> {
     // HACK(eddyb) try to get the last stored value.
-    fn subst_reduce_load<P: Platform>(
+    fn subst_reduce_load(
         self,
-        cx: &Cx<P>,
+        cx: &Cx,
         base: Option<&State>,
         addr: Use<Val>,
         size: MemSize,
@@ -118,7 +118,7 @@ impl Use<Mem> {
 
 // FIXME(eddyb) introduce a more general "folder" abstraction.
 impl Use<Val> {
-    fn subst_reduce<P: Platform>(self, cx: &Cx<P>, base: Option<&State>) -> Self {
+    fn subst_reduce(self, cx: &Cx, base: Option<&State>) -> Self {
         let v = match cx[self] {
             Val::InReg(r) => {
                 return base.map_or(self, |base| base.regs[r.index].subst_reduce(cx, None))
@@ -185,8 +185,8 @@ impl Exit {
     }
 }
 
-pub struct Explorer<'a, P> {
-    pub cx: &'a Cx<P>,
+pub struct Explorer<'a> {
+    pub cx: &'a Cx,
     pub blocks: BTreeMap<BlockId, Block>,
 
     /// Analysis output indicating that a block takes a "continuation" which is
@@ -203,8 +203,8 @@ pub struct Explorer<'a, P> {
     exit_cache: HashMap<(BlockId, ExitOptions), Exit>,
 }
 
-impl<'a, P: Platform> Explorer<'a, P> {
-    pub fn new(cx: &'a Cx<P>, cancel_token: Option<&'a AtomicBool>) -> Self {
+impl<'a> Explorer<'a> {
+    pub fn new(cx: &'a Cx, cancel_token: Option<&'a AtomicBool>) -> Self {
         Explorer {
             cx,
             blocks: BTreeMap::new(),
@@ -220,9 +220,9 @@ impl<'a, P: Platform> Explorer<'a, P> {
         // efficient check (`if let Some(x) = map.get(k) { return x; }`).
         while !self.blocks.contains_key(&bb) {
             let mut state = self.cx.default.clone();
-            let mut pc = Const::new(P::Isa::ADDR_SIZE, bb.entry_pc);
+            let mut pc = Const::new(self.cx.platform.isa().addr_size(), bb.entry_pc);
             let edges = loop {
-                match P::Isa::lift_instr(self.cx, &mut pc, state) {
+                match self.cx.platform.isa().lift_instr(self.cx, &mut pc, state) {
                     Ok(new_state) => state = new_state,
                     Err(edges) => break edges,
                 }

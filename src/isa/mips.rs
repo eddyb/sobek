@@ -1,7 +1,6 @@
 use crate::ir::{
     BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, IntOp, Isa, Mem, MemRef, MemSize, Platform, Rom, State, Use,
-    Val,
+    Const, Cx, Edge, Edges, Effect, IntOp, Isa, Mem, MemRef, MemSize, State, Use, Val,
 };
 use std::iter;
 
@@ -73,9 +72,11 @@ impl State {
 }
 
 impl Isa for Mips32 {
-    const ADDR_SIZE: BitSize = B32;
+    fn addr_size(&self) -> BitSize {
+        B32
+    }
 
-    fn default_regs(cx: &Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>> {
+    fn default_regs(&self, cx: &Cx) -> Vec<Use<Val>> {
         let lower = (&GPR_NAMES.0, &MUL_DIV_REG_NAMES.0);
         let upper = (&GPR_NAMES.1, &MUL_DIV_REG_NAMES.1);
         [lower, upper]
@@ -103,11 +104,7 @@ impl Isa for Mips32 {
             .collect()
     }
 
-    fn lift_instr(
-        cx: &Cx<impl Platform<Isa = Self>>,
-        pc: &mut Const,
-        mut state: State,
-    ) -> Result<State, Edges<Edge>> {
+    fn lift_instr(&self, cx: &Cx, pc: &mut Const, mut state: State) -> Result<State, Edges<Edge>> {
         macro_rules! error {
             ($($args:tt)*) => {
                 return Err(Edges::One(Edge {
@@ -159,7 +156,7 @@ impl Isa for Mips32 {
             ($target:expr) => {{
                 let target = $target;
                 // Process delay slot.
-                match Self::lift_instr(cx, pc, state) {
+                match self.lift_instr(cx, pc, state) {
                     Ok(state) => Err(Edges::One(Edge {
                         state,
                         effect: Effect::Jump(target),
@@ -207,7 +204,7 @@ impl Isa for Mips32 {
                 assert_eq!(cx[cond].size(), B1);
 
                 // Process delay slot.
-                match Self::lift_instr(cx, pc, state) {
+                match self.lift_instr(cx, pc, state) {
                     Ok(state) => Err(Edges::Branch {
                         cond,
                         t: Edge { state: state.clone(), effect: Effect::Jump(t) },

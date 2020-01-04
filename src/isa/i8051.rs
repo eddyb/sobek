@@ -1,7 +1,6 @@
 use crate::ir::{
     BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, IntOp, Isa, Mem, MemRef, MemSize, Platform, Rom, State, Use,
-    Val,
+    Const, Cx, Edge, Edges, Effect, IntOp, Isa, Mem, MemRef, MemSize, State, Use, Val,
 };
 use std::iter;
 
@@ -25,9 +24,11 @@ enum Reg {
 
 impl Isa for I8051 {
     // FIXME(eddyb) add proper support for a Harvard architecture.
-    const ADDR_SIZE: BitSize = B16;
+    fn addr_size(&self) -> BitSize {
+        B16
+    }
 
-    fn default_regs(cx: &Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>> {
+    fn default_regs(&self, cx: &Cx) -> Vec<Use<Val>> {
         (0..0x80)
             .map(|i| {
                 crate::ir::Reg {
@@ -61,11 +62,7 @@ impl Isa for I8051 {
             .collect()
     }
 
-    fn lift_instr(
-        cx: &Cx<impl Platform<Isa = Self>>,
-        pc: &mut Const,
-        mut state: State,
-    ) -> Result<State, Edges<Edge>> {
+    fn lift_instr(&self, cx: &Cx, pc: &mut Const, mut state: State) -> Result<State, Edges<Edge>> {
         let add1 = |x| IntOp::Add.eval(x, Const::new(x.size, 1)).unwrap();
 
         macro_rules! error {

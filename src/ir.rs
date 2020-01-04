@@ -101,8 +101,8 @@ mod store {
         }
     }
 
-    impl<P: Platform> Cx<P> {
-        pub fn new(platform: P) -> Self {
+    impl Cx {
+        pub fn new(platform: impl Platform + 'static) -> Self {
             let stores = Stores::default();
 
             let default = State {
@@ -112,31 +112,31 @@ mod store {
 
             let mut cx = Cx {
                 stores,
-                platform,
+                platform: Box::new(platform),
                 default,
             };
 
-            cx.default.regs = P::Isa::default_regs(&cx);
+            cx.default.regs = cx.platform.isa().default_regs(&cx);
 
             cx
         }
     }
 
-    pub trait AllocIn<C>: Sized {
+    pub trait AllocIn: Sized {
         type Kind;
-        fn alloc_in(self, cx: &C) -> Use<Self::Kind>;
+        fn alloc_in(self, cx: &Cx) -> Use<Self::Kind>;
     }
 
     // FIXME(eddyb) is this sort of thing even needed anymore?
-    impl<C, K: AllocIn<C, Kind = K>, F: FnOnce(&C) -> K> AllocIn<C> for F {
+    impl<K: AllocIn<Kind = K>, F: FnOnce(&Cx) -> K> AllocIn for F {
         type Kind = K;
-        fn alloc_in(self, cx: &C) -> Use<K> {
+        fn alloc_in(self, cx: &Cx) -> Use<K> {
             self(cx).alloc_in(cx)
         }
     }
 
-    impl<P> Cx<P> {
-        pub fn a<T: AllocIn<Self>>(&self, x: T) -> Use<T::Kind> {
+    impl Cx {
+        pub fn a<T: AllocIn>(&self, x: T) -> Use<T::Kind> {
             x.alloc_in(self)
         }
     }
@@ -153,9 +153,9 @@ mod store {
                 }
             }
 
-            impl<P> AllocIn<Cx<P>> for $k {
+            impl AllocIn for $k {
                 type Kind = Self;
-                fn alloc_in(self, cx: &Cx<P>) -> Use<Self> {
+                fn alloc_in(self, cx: &Cx) -> Use<Self> {
                     match self.normalize(cx) {
                         Ok(x) => cx.stores.$field.alloc(x),
                         Err(u) => u,
@@ -256,9 +256,9 @@ impl fmt::Debug for Const {
     }
 }
 
-impl<P> AllocIn<Cx<P>> for Const {
+impl AllocIn for Const {
     type Kind = Val;
-    fn alloc_in(self, cx: &Cx<P>) -> Use<Val> {
+    fn alloc_in(self, cx: &Cx) -> Use<Val> {
         cx.a(Val::Const(self))
     }
 }
@@ -564,7 +564,7 @@ impl fmt::Debug for MemRef {
 }
 
 impl MemRef {
-    pub fn subst<P>(self, cx: &Cx<P>, base: &State) -> Self {
+    pub fn subst(self, cx: &Cx, base: &State) -> Self {
         MemRef {
             mem: self.mem.subst(cx, base),
             addr: self.addr.subst(cx, base),
@@ -650,30 +650,30 @@ impl fmt::Debug for Val {
 }
 
 impl Val {
-    // FIXME(eddyb) should these take `&Cx<P>` instead?
-    pub fn int_neg<P>(v: Use<Val>) -> impl AllocIn<Cx<P>, Kind = Self> {
-        move |cx: &Cx<P>| {
+    // FIXME(eddyb) should these take `&Cx` instead?
+    pub fn int_neg(v: Use<Val>) -> impl AllocIn<Kind = Self> {
+        move |cx: &Cx| {
             let size = cx[v].size();
             Val::Int(IntOp::Mul, size, v, cx.a(Const::new(size, size.mask())))
         }
     }
 
-    pub fn int_sub<P>(a: Use<Val>, b: Use<Val>) -> impl AllocIn<Cx<P>, Kind = Self> {
-        move |cx: &Cx<P>| {
+    pub fn int_sub(a: Use<Val>, b: Use<Val>) -> impl AllocIn<Kind = Self> {
+        move |cx: &Cx| {
             let size = cx[a].size();
             Val::Int(IntOp::Add, size, a, cx.a(Val::int_neg(b)))
         }
     }
 
-    pub fn bit_not<P>(v: Use<Val>) -> impl AllocIn<Cx<P>, Kind = Self> {
-        move |cx: &Cx<P>| {
+    pub fn bit_not(v: Use<Val>) -> impl AllocIn<Kind = Self> {
+        move |cx: &Cx| {
             let size = cx[v].size();
             Val::Int(IntOp::Xor, size, v, cx.a(Const::new(size, size.mask())))
         }
     }
 
-    pub fn bit_rol<P>(v: Use<Val>, n: Use<Val>) -> impl AllocIn<Cx<P>, Kind = Self> {
-        move |cx: &Cx<P>| {
+    pub fn bit_rol(v: Use<Val>, n: Use<Val>) -> impl AllocIn<Kind = Self> {
+        move |cx: &Cx| {
             let size = cx[v].size();
             Val::Int(
                 IntOp::Or,
@@ -692,8 +692,8 @@ impl Val {
         }
     }
 
-    pub fn bit_ror<P>(v: Use<Val>, n: Use<Val>) -> impl AllocIn<Cx<P>, Kind = Self> {
-        move |cx: &Cx<P>| {
+    pub fn bit_ror(v: Use<Val>, n: Use<Val>) -> impl AllocIn<Kind = Self> {
+        move |cx: &Cx| {
             let size = cx[v].size();
             Val::Int(
                 IntOp::Or,
@@ -758,7 +758,7 @@ impl Val {
         None
     }
 
-    fn normalize<P>(self, cx: &Cx<P>) -> Result<Self, Use<Self>> {
+    fn normalize(self, cx: &Cx) -> Result<Self, Use<Self>> {
         // TODO(eddyb) resolve loads.
 
         if let Val::Const(c) = self {
@@ -977,9 +977,7 @@ impl Val {
 }
 
 pub trait Visitor: Sized {
-    type Platform;
-
-    fn cx(&self) -> &Cx<Self::Platform>;
+    fn cx(&self) -> &Cx;
 
     fn visit_val_use(&mut self, v: Use<Val>) {
         v.walk(self);
@@ -1049,7 +1047,7 @@ impl Visit for Val {
 }
 
 impl Use<Val> {
-    pub fn subst<P>(self, cx: &Cx<P>, base: &State) -> Self {
+    pub fn subst(self, cx: &Cx, base: &State) -> Self {
         let v = match cx[self] {
             Val::InReg(r) => return base.regs[r.index],
 
@@ -1089,7 +1087,7 @@ impl fmt::Debug for Mem {
 }
 
 impl Mem {
-    fn normalize<P>(self, cx: &Cx<P>) -> Result<Self, Use<Self>> {
+    fn normalize(self, cx: &Cx) -> Result<Self, Use<Self>> {
         if let Mem::Store(r, v) = self {
             let r_size: BitSize = r.size.into();
             assert_eq!(r_size, cx[v].size());
@@ -1126,7 +1124,7 @@ impl Visit for Mem {
 }
 
 impl Use<Mem> {
-    pub fn subst<P>(self, cx: &Cx<P>, base: &State) -> Self {
+    pub fn subst(self, cx: &Cx, base: &State) -> Self {
         let m = match cx[self] {
             Mem::In => return base.mem,
 
@@ -1272,17 +1270,13 @@ pub struct Block {
     pub edges: Edges<Edge>,
 }
 
-pub trait Isa: Sized {
-    const ADDR_SIZE: BitSize;
+pub trait Isa {
+    fn addr_size(&self) -> BitSize;
 
-    fn default_regs(cx: &Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>>;
+    fn default_regs(&self, cx: &Cx) -> Vec<Use<Val>>;
 
     // FIXME(eddyb) replace the `Result` with a dedicated enum.
-    fn lift_instr(
-        cx: &Cx<impl Platform<Isa = Self>>,
-        pc: &mut Const,
-        state: State,
-    ) -> Result<State, Edges<Edge>>;
+    fn lift_instr(&self, cx: &Cx, pc: &mut Const, state: State) -> Result<State, Edges<Edge>>;
 }
 
 #[derive(Debug)]
@@ -1355,13 +1349,10 @@ impl<T: Deref<Target = [u8]>> Rom for RawRom<T> {
 }
 
 // FIXME(eddyb) maybe this and friends (e.g. `Rom`) shouldn't be here.
-// but `Cx<P>` requires `P: Platform`, so some reorganization is needed.
+// but `Cx` uses `Platform`, so some reorganization is needed.
 pub trait Platform {
-    type Isa: Isa;
-    type Rom: Rom;
-
-    fn isa(&self) -> &Self::Isa;
-    fn rom(&self) -> &Self::Rom;
+    fn isa(&self) -> &dyn Isa;
+    fn rom(&self) -> &dyn Rom;
 }
 
 pub struct SimplePlatform<A, R> {
@@ -1370,25 +1361,22 @@ pub struct SimplePlatform<A, R> {
 }
 
 impl<A: Isa, R: Rom> Platform for SimplePlatform<A, R> {
-    type Isa = A;
-    type Rom = R;
-
-    fn isa(&self) -> &Self::Isa {
+    fn isa(&self) -> &dyn Isa {
         &self.isa
     }
-    fn rom(&self) -> &Self::Rom {
+    fn rom(&self) -> &dyn Rom {
         &self.rom
     }
 }
 
-pub struct Cx<P> {
+pub struct Cx {
     stores: Stores,
 
-    pub platform: P,
+    pub platform: Box<dyn Platform>,
     pub default: State,
 }
 
-impl<K, P> Index<K> for Cx<P>
+impl<K> Index<K> for Cx
 where
     Stores: Index<K>,
 {
@@ -1398,7 +1386,7 @@ where
     }
 }
 
-impl<P> Cx<P> {
+impl Cx {
     pub fn pretty_print<'a>(
         &'a self,
         value: &'a (impl Visit + fmt::Debug),
@@ -1426,15 +1414,13 @@ impl<P> Cx<P> {
             state_mem: Option<Use<Mem>>,
         }
 
-        struct UseCounter<'a, P> {
-            cx: &'a Cx<P>,
+        struct UseCounter<'a> {
+            cx: &'a Cx,
             data: &'a mut Data,
         }
 
-        impl<P> Visitor for UseCounter<'_, P> {
-            type Platform = P;
-
-            fn cx(&self) -> &Cx<Self::Platform> {
+        impl Visitor for UseCounter<'_> {
+            fn cx(&self) -> &Cx {
                 self.cx
             }
 
@@ -1454,16 +1440,14 @@ impl<P> Cx<P> {
             }
         }
 
-        struct Numberer<'a, P> {
-            cx: &'a Cx<P>,
+        struct Numberer<'a> {
+            cx: &'a Cx,
             data: &'a mut Data,
             allow_inline: bool,
         }
 
-        impl<P> Visitor for Numberer<'_, P> {
-            type Platform = P;
-
-            fn cx(&self) -> &Cx<Self::Platform> {
+        impl Visitor for Numberer<'_> {
+            fn cx(&self) -> &Cx {
                 self.cx
             }
 
@@ -1549,15 +1533,15 @@ impl<P> Cx<P> {
             }
         }
 
-        struct Printer<'a, P, F> {
-            cx: &'a Cx<P>,
+        struct Printer<'a, F> {
+            cx: &'a Cx,
             data: &'a Data,
             fmt: &'a mut F,
             seen: PerKind<HashSet<Use<Val>>, HashSet<Use<Mem>>>,
             empty: bool,
         }
 
-        impl<P, F: fmt::Write> Printer<'_, P, F> {
+        impl<F: fmt::Write> Printer<'_, F> {
             fn start_def(&mut self) {
                 if self.empty {
                     self.empty = false;
@@ -1567,10 +1551,8 @@ impl<P> Cx<P> {
             }
         }
 
-        impl<P, F: fmt::Write> Visitor for Printer<'_, P, F> {
-            type Platform = P;
-
-            fn cx(&self) -> &Cx<Self::Platform> {
+        impl<F: fmt::Write> Visitor for Printer<'_, F> {
+            fn cx(&self) -> &Cx {
                 self.cx
             }
 
@@ -1708,14 +1690,14 @@ impl<P> Cx<P> {
             allow_inline: true,
         });
 
-        struct PrintFromDisplay<'a, P, T> {
-            cx: &'a Cx<P>,
+        struct PrintFromDisplay<'a, T> {
+            cx: &'a Cx,
             data: Data,
 
             edge_states_and_values: Edges<(&'a State, &'a T)>,
         }
 
-        impl<P, T> fmt::Display for PrintFromDisplay<'_, P, T>
+        impl<T> fmt::Display for PrintFromDisplay<'_, T>
         where
             T: Visit + fmt::Debug,
         {

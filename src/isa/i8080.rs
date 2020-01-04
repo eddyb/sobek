@@ -1,7 +1,6 @@
 use crate::ir::{
     BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, IntOp, Isa, Mem, MemRef, MemSize, Platform, Rom, State, Use,
-    Val,
+    Const, Cx, Edge, Edges, Effect, IntOp, Isa, Mem, MemRef, MemSize, State, Use, Val,
 };
 use std::iter;
 
@@ -67,9 +66,11 @@ impl Flavor {
 }
 
 impl Isa for I8080 {
-    const ADDR_SIZE: BitSize = B16;
+    fn addr_size(&self) -> BitSize {
+        B16
+    }
 
-    fn default_regs(cx: &Cx<impl Platform<Isa = Self>>) -> Vec<Use<Val>> {
+    fn default_regs(&self, cx: &Cx) -> Vec<Use<Val>> {
         iter::once(crate::ir::Reg {
             index: Reg::A as usize,
             size: B8,
@@ -106,12 +107,8 @@ impl Isa for I8080 {
         .collect()
     }
 
-    fn lift_instr(
-        cx: &Cx<impl Platform<Isa = Self>>,
-        pc: &mut Const,
-        mut state: State,
-    ) -> Result<State, Edges<Edge>> {
-        let flavor = cx.platform.isa().flavor;
+    fn lift_instr(&self, cx: &Cx, pc: &mut Const, mut state: State) -> Result<State, Edges<Edge>> {
+        let flavor = self.flavor;
 
         let add1 = |x| IntOp::Add.eval(x, Const::new(x.size, 1)).unwrap();
 

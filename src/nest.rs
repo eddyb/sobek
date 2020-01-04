@@ -14,15 +14,15 @@ struct NestedBlock {
     static_exits: BTreeMap<BlockId, usize>,
 }
 
-pub struct Nester<'a, P> {
-    pub explorer: &'a Explorer<'a, P>,
+pub struct Nester<'a> {
+    pub explorer: &'a Explorer<'a>,
     ref_counts: HashMap<BlockId, usize>,
 
     nested_block_cache: FrozenMap<BlockId, Box<NestedBlock>>,
 }
 
-impl<'a, P> Nester<'a, P> {
-    pub fn new(explorer: &'a Explorer<'a, P>) -> Self {
+impl<'a> Nester<'a> {
+    pub fn new(explorer: &'a Explorer<'a>) -> Self {
         let mut nester = Nester {
             explorer,
             ref_counts: HashMap::new(),

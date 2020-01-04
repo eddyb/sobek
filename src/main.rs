@@ -1,5 +1,5 @@
 use sobek::explore::Explorer;
-use sobek::ir::{BitSize, Const, Cx, Isa, Platform, RawRom, SimplePlatform};
+use sobek::ir::{BitSize, Const, Cx, Platform, RawRom, SimplePlatform};
 use sobek::isa::i8051::I8051;
 use sobek::isa::i8080::I8080;
 use sobek::isa::mips::Mips32;
@@ -8,7 +8,7 @@ use std::iter;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-fn analyze_and_dump<P: Platform>(platform: P, entries: impl Iterator<Item = Const>) {
+fn analyze_and_dump<P: Platform + 'static>(platform: P, entries: impl Iterator<Item = Const>) {
     let cx = Cx::new(platform);
 
     let cancel_token = Arc::new(AtomicBool::new(false));
@@ -35,7 +35,7 @@ fn analyze_and_dump<P: Platform>(platform: P, entries: impl Iterator<Item = Cons
     let nester = sobek::nest::Nester::new(&explorer);
 
     let mut nested_pc = ..Const::new(
-        P::Isa::ADDR_SIZE,
+        cx.platform.isa().addr_size(),
         explorer.blocks.keys().next().unwrap().entry_pc,
     );
     let mut last_end = nested_pc.end.as_u64();
