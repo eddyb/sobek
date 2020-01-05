@@ -197,7 +197,7 @@ impl Isa for Mips32 {
                     (e, t)
                 };
 
-                assert_eq!(cx[cond].ty(), Type::Bits(B1));
+                assert_eq!(cx[cond].ty(cx), Type::Bits(B1));
 
                 // Process delay slot.
                 match self.lift_instr(cx, rom, pc, state) {
@@ -499,7 +499,7 @@ impl Isa for Mips32 {
                     };
 
                     let mut v = node!(Int(op, B32, rs, cx.a(imm)));
-                    if cx[v].ty() == Type::Bits(B1) {
+                    if cx[v].ty(cx) == Type::Bits(B1) {
                         v = node!(Zext(B32, v));
                     }
                     state.set(rd, v);

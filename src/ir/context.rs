@@ -1,4 +1,4 @@
-use crate::ir::Node;
+use crate::ir::{Node, Reg};
 use elsa::FrozenVec;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -93,7 +93,32 @@ macro_rules! interners {
 }
 
 interners! {
+    IReg => Reg,
     INode => Node,
+}
+
+// FIXME(eddyb) automate this away somehow.
+impl AsRef<Self> for Reg {
+    fn as_ref(&self) -> &Self {
+        self
+    }
+}
+
+impl InternInCx for Reg {
+    type Interned = IReg;
+    fn intern_in_cx(self, cx: &Cx) -> IReg {
+        IReg(cx.interners.IReg.intern(self))
+    }
+}
+
+impl fmt::Debug for IReg {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if super::DBG_CX.is_set() {
+            super::DBG_CX.with(|cx| write!(f, "{:?}", &cx[*self]))
+        } else {
+            write!(f, "reg#{:x}", self.0)
+        }
+    }
 }
 
 // FIXME(eddyb) automate this away somehow.

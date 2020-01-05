@@ -125,7 +125,9 @@ impl INode {
     fn subst_reduce(self, cx: &Cx, rom: &dyn Rom, base: Option<&State>) -> Self {
         cx.a(match cx[self] {
             Node::InReg(r) => {
-                return base.map_or(self, |base| base.regs[r.index].subst_reduce(cx, rom, None))
+                return base.map_or(self, |base| {
+                    base.regs[cx[r].index].subst_reduce(cx, rom, None)
+                })
             }
 
             Node::Const(_) => return self,
@@ -242,12 +244,18 @@ impl<'a> Explorer<'a> {
         // FIXME(eddyb) clean this up whenever NLL/Polonius can do the
         // efficient check (`if let Some(x) = map.get(k) { return x; }`).
         while !self.blocks.contains_key(&bb) {
-            let reg_defs = self.platform.isa().regs();
+            let reg_defs: Vec<_> = self
+                .platform
+                .isa()
+                .regs()
+                .into_iter()
+                .map(|r| self.cx.a(r))
+                .collect();
             let mut state = State {
                 mem: self.cx.a(Node::InMem),
                 regs: reg_defs
                     .iter()
-                    .map(|&v| self.cx.a(Node::InReg(v)))
+                    .map(|&r| self.cx.a(Node::InReg(r)))
                     .collect(),
                 reg_defs,
             };

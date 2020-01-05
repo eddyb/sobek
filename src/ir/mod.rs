@@ -6,7 +6,7 @@ use std::mem;
 use std::ops::RangeTo;
 
 mod context;
-pub use self::context::{Cx, INode, InternInCx};
+pub use self::context::{Cx, INode, IReg, InternInCx};
 
 scoped_thread_local!(static DBG_CX: Cx);
 scoped_thread_local!(static DBG_LOCALS: HashMap<INode, (&'static str, usize)>);
@@ -317,6 +317,7 @@ impl IntOp {
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Reg {
+    // FIXME(eddyb) stop using indices for registers.
     pub index: usize,
     pub size: BitSize,
     pub name: &'static str,
@@ -414,7 +415,7 @@ impl MemRef {
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Node {
     // Bits nodes.
-    InReg(Reg),
+    InReg(IReg),
 
     Const(Const),
     Int(IntOp, BitSize, INode, INode),
@@ -509,28 +510,28 @@ impl Node {
     // FIXME(eddyb) should these take `&Cx` instead?
     pub fn int_neg(v: INode) -> impl InternInCx<Interned = INode> {
         move |cx: &Cx| {
-            let size = cx[v].ty().bit_size().unwrap();
+            let size = cx[v].ty(cx).bit_size().unwrap();
             Node::Int(IntOp::Mul, size, v, cx.a(Const::new(size, size.mask())))
         }
     }
 
     pub fn int_sub(a: INode, b: INode) -> impl InternInCx<Interned = INode> {
         move |cx: &Cx| {
-            let size = cx[a].ty().bit_size().unwrap();
+            let size = cx[a].ty(cx).bit_size().unwrap();
             Node::Int(IntOp::Add, size, a, cx.a(Node::int_neg(b)))
         }
     }
 
     pub fn bit_not(v: INode) -> impl InternInCx<Interned = INode> {
         move |cx: &Cx| {
-            let size = cx[v].ty().bit_size().unwrap();
+            let size = cx[v].ty(cx).bit_size().unwrap();
             Node::Int(IntOp::Xor, size, v, cx.a(Const::new(size, size.mask())))
         }
     }
 
     pub fn bit_rol(v: INode, n: INode) -> impl InternInCx<Interned = INode> {
         move |cx: &Cx| {
-            let size = cx[v].ty().bit_size().unwrap();
+            let size = cx[v].ty(cx).bit_size().unwrap();
             Node::Int(
                 IntOp::Or,
                 size,
@@ -541,7 +542,7 @@ impl Node {
                     v,
                     cx.a(Node::int_sub(
                         cx.a(Const::new(
-                            cx[n].ty().bit_size().unwrap(),
+                            cx[n].ty(cx).bit_size().unwrap(),
                             size.bits() as u64,
                         )),
                         n,
@@ -553,7 +554,7 @@ impl Node {
 
     pub fn bit_ror(v: INode, n: INode) -> impl InternInCx<Interned = INode> {
         move |cx: &Cx| {
-            let size = cx[v].ty().bit_size().unwrap();
+            let size = cx[v].ty(cx).bit_size().unwrap();
             Node::Int(
                 IntOp::Or,
                 size,
@@ -564,7 +565,7 @@ impl Node {
                     v,
                     cx.a(Node::int_sub(
                         cx.a(Const::new(
-                            cx[n].ty().bit_size().unwrap(),
+                            cx[n].ty(cx).bit_size().unwrap(),
                             size.bits() as u64,
                         )),
                         n,
@@ -574,9 +575,9 @@ impl Node {
         }
     }
 
-    pub fn ty(&self) -> Type {
+    pub fn ty(&self, cx: &Cx) -> Type {
         match self {
-            Node::InReg(r) => Type::Bits(r.size),
+            Node::InReg(r) => Type::Bits(cx[*r].size),
             Node::Const(c) => Type::Bits(c.size),
 
             Node::Int(IntOp::Eq, _, _, _)
@@ -628,8 +629,8 @@ impl Node {
         }
 
         if let Node::Int(op, size, a, b) = self {
-            let a_size = cx[a].ty().bit_size().unwrap();
-            let b_size = cx[b].ty().bit_size().unwrap();
+            let a_size = cx[a].ty(cx).bit_size().unwrap();
+            let b_size = cx[b].ty(cx).bit_size().unwrap();
             assert_eq!(a_size, size);
 
             let is_shift = match op {
@@ -709,7 +710,7 @@ impl Node {
                         }
 
                         Node::Zext(_, inner) => {
-                            Const::new(size, cx[inner].ty().bit_size().unwrap().mask())
+                            Const::new(size, cx[inner].ty(cx).bit_size().unwrap().mask())
                         }
 
                         _ => unreachable!(),
@@ -774,7 +775,7 @@ impl Node {
 
         // FIXME(eddyb) deduplicate these
         if let Node::Trunc(size, x) = self {
-            let x_size = cx[x].ty().bit_size().unwrap();
+            let x_size = cx[x].ty(cx).bit_size().unwrap();
             assert!(size < x_size);
 
             if let Some(c) = cx[x].as_const() {
@@ -784,7 +785,7 @@ impl Node {
             // HACK(eddyb) replace `trunc({s,z}ext(y))` with something simpler.
             // NOTE(eddyb) this doesn't seem to be hit in practice, maybe remove?
             if let Node::Sext(_, y) | Node::Zext(_, y) = cx[x] {
-                let y_size = cx[y].ty().bit_size().unwrap();
+                let y_size = cx[y].ty(cx).bit_size().unwrap();
                 return if size == y_size {
                     Err(y)
                 } else if size < y_size {
@@ -800,7 +801,7 @@ impl Node {
         }
 
         if let Node::Sext(size, x) = self {
-            let x_size = cx[x].ty().bit_size().unwrap();
+            let x_size = cx[x].ty(cx).bit_size().unwrap();
             assert!(size > x_size);
 
             if let Some(c) = cx[x].as_const() {
@@ -812,7 +813,7 @@ impl Node {
         }
 
         if let Node::Zext(size, x) = self {
-            let x_size = cx[x].ty().bit_size().unwrap();
+            let x_size = cx[x].ty(cx).bit_size().unwrap();
             assert!(size > x_size);
 
             if let Some(c) = cx[x].as_const() {
@@ -821,7 +822,7 @@ impl Node {
 
             // HACK(eddyb) replace `zext(trunc(y))` by `y & mask`.
             if let Node::Trunc(_, y) = cx[x] {
-                let y_size = cx[y].ty().bit_size().unwrap();
+                let y_size = cx[y].ty(cx).bit_size().unwrap();
                 if size == y_size {
                     return Node::Int(
                         IntOp::And,
@@ -835,14 +836,14 @@ impl Node {
         }
 
         if let Node::Load(r) = self {
-            assert_eq!(cx[r.mem].ty(), Type::Mem);
+            assert_eq!(cx[r.mem].ty(cx), Type::Mem);
         }
 
         if let Node::Store(r, v) = self {
-            assert_eq!(cx[r.mem].ty(), Type::Mem);
+            assert_eq!(cx[r.mem].ty(cx), Type::Mem);
 
             let r_size: BitSize = r.size.into();
-            assert_eq!(cx[v].ty(), Type::Bits(r_size));
+            assert_eq!(cx[v].ty(cx), Type::Bits(r_size));
         }
 
         // TODO(eddyb) sort symmetric ops.
@@ -927,7 +928,7 @@ impl Visit for Node {
 impl INode {
     pub fn subst(self, cx: &Cx, base: &State) -> Self {
         cx.a(match cx[self] {
-            Node::InReg(r) => return base.regs[r.index],
+            Node::InReg(r) => return base.regs[cx[r].index],
 
             Node::Const(_) => return self,
 
@@ -982,10 +983,10 @@ impl Visit for Effect {
 #[derive(Clone)]
 pub struct State {
     pub mem: INode,
-    pub regs: Vec<INode>,
 
-    // FIXME(eddyb) intern this information.
-    pub reg_defs: Vec<Reg>,
+    // FIXME(eddyb) stop using indices for registers.
+    pub regs: Vec<INode>,
+    pub reg_defs: Vec<IReg>,
 }
 
 impl Visit for State {
@@ -1113,7 +1114,7 @@ impl Cx {
             use_counts: HashMap<INode, usize>,
             numbered_counts: HashMap<&'static str, usize>,
             locals: HashMap<INode, (&'static str, usize)>,
-            val_to_state_regs: HashMap<INode, Vec<Reg>>,
+            val_to_state_regs: HashMap<INode, Vec<IReg>>,
             state_mem: Option<INode>,
         }
 
@@ -1191,7 +1192,7 @@ impl Cx {
                     _ => allowed_inline && self.data.use_counts[&node] == 1,
                 };
                 if !inline {
-                    let prefix = match self.cx[node].ty() {
+                    let prefix = match self.cx[node].ty(self.cx) {
                         Type::Bits(_) => "v",
                         Type::Mem => "m",
                     };

@@ -152,7 +152,7 @@ impl Isa for I8080 {
         macro_rules! mem_ref {
             ($addr:expr, $sz:ident) => {{
                 let addr = $addr;
-                assert_eq!(cx[addr].ty(), Type::Bits(B16));
+                assert_eq!(cx[addr].ty(cx), Type::Bits(B16));
                 MemRef {
                     mem: state.mem,
                     addr,
@@ -167,7 +167,7 @@ impl Isa for I8080 {
         macro_rules! push {
             ($value:expr) => {{
                 let value = $value;
-                let size = cx[value].ty().bit_size().unwrap();
+                let size = cx[value].ty(cx).bit_size().unwrap();
                 let sp = node!(int_sub(
                     state.regs[Reg::SP as usize],
                     cx.a(Const::new(B16, (size.bits() / 8) as u64))
@@ -235,7 +235,7 @@ impl Isa for I8080 {
                     effect: Effect::Jump(cx.a(*pc)),
                 };
 
-                assert_eq!(cx[cond].ty(), Type::Bits(B1));
+                assert_eq!(cx[cond].ty(cx), Type::Bits(B1));
 
                 Err(Edges::Branch { cond, t, e })
             }};

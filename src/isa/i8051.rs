@@ -105,7 +105,7 @@ impl Isa for I8051 {
         macro_rules! mem_ref {
             ($addr:expr, $sz:ident) => {{
                 let addr = $addr;
-                assert_eq!(cx[addr].ty(), Type::Bits(B8));
+                assert_eq!(cx[addr].ty(cx), Type::Bits(B8));
                 MemRef {
                     mem: state.mem,
                     addr,
@@ -120,7 +120,7 @@ impl Isa for I8051 {
         macro_rules! push {
             ($value:expr) => {{
                 let value = $value;
-                let size = cx[value].ty().bit_size().unwrap();
+                let size = cx[value].ty(cx).bit_size().unwrap();
                 let sp = node!(Int(
                     IntOp::Add,
                     B8,
@@ -182,7 +182,7 @@ impl Isa for I8051 {
                     (e, t)
                 };
 
-                assert_eq!(cx[cond].ty(), Type::Bits(B1));
+                assert_eq!(cx[cond].ty(cx), Type::Bits(B1));
 
                 Err(Edges::Branch {
                     cond,
