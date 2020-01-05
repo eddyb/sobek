@@ -1,6 +1,6 @@
 use crate::ir::{
     BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, IntOp, MemRef, MemSize, Node, State, Type, Use,
+    Const, Cx, Edge, Edges, Effect, INode, IntOp, MemRef, MemSize, Node, State, Type,
 };
 use crate::isa::Isa;
 use crate::platform::Rom;
@@ -66,7 +66,7 @@ const NUM_REGS: usize = 32 + 2;
 
 // FIXME(eddyb) make a `State` wrapper to contain these helpers.
 impl State {
-    fn get(&self, cx: &Cx, r: usize) -> Use<Node> {
+    fn get(&self, cx: &Cx, r: usize) -> INode {
         if r == 0 || r == NUM_REGS {
             cx.a(Const::new(B32, 0))
         } else {
@@ -74,7 +74,7 @@ impl State {
         }
     }
 
-    fn set(&mut self, r: usize, v: Use<Node>) {
+    fn set(&mut self, r: usize, v: INode) {
         if r != 0 && r != NUM_REGS {
             self.regs[r] = v;
         }

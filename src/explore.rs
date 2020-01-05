@@ -1,5 +1,5 @@
 use crate::ir::{
-    BitSize, Block, Const, Cx, Edge, Edges, Effect, MemRef, MemSize, Node, State, Use, Visit,
+    BitSize, Block, Const, Cx, Edge, Edges, Effect, INode, MemRef, MemSize, Node, State, Visit,
     Visitor,
 };
 use crate::platform::{Platform, Rom};
@@ -78,16 +78,16 @@ impl From<Const> for BlockId {
     }
 }
 
-impl Use<Node> {
+impl INode {
     // HACK(eddyb) try to get the last stored value.
     fn subst_reduce_load(
         self,
         cx: &Cx,
         rom: &dyn Rom,
         base: Option<&State>,
-        addr: Use<Node>,
+        addr: INode,
         size: MemSize,
-    ) -> Use<Node> {
+    ) -> INode {
         match cx[self] {
             Node::InMem => match base {
                 Some(base) => base.mem.subst_reduce_load(cx, rom, None, addr, size),
@@ -121,7 +121,7 @@ impl Use<Node> {
 }
 
 // FIXME(eddyb) introduce a more general "folder" abstraction.
-impl Use<Node> {
+impl INode {
     fn subst_reduce(self, cx: &Cx, rom: &dyn Rom, base: Option<&State>) -> Self {
         cx.a(match cx[self] {
             Node::InReg(r) => {
@@ -164,7 +164,7 @@ struct ExitOptions {
     /// Argument value for the exit "continuation".
     /// If present, will be back-propagated from
     /// all the jumps to the exit "continuation".
-    arg_value: Option<Use<Node>>,
+    arg_value: Option<INode>,
 }
 
 struct Partial {
@@ -179,12 +179,12 @@ struct Exit {
     /// Set of non-constant jump destination values.
     /// An empty set indicates the (sub-)CFG diverges, by
     /// eventually reaching infinite loops and/or traps.
-    targets: Set1<Use<Node>>,
+    targets: Set1<INode>,
 
     /// Set of "continuation argument" values.
     /// Only empty if no argument was provided (see `ExitKey`).
     // TODO(eddyb) should this be per `targets` value?
-    arg_values: Set1<Use<Node>>,
+    arg_values: Set1<INode>,
 
     /// Indicates whether this (sub-)CFG contains unresolved
     /// cycles, which may have resulted in the computed exit
@@ -410,7 +410,7 @@ impl<'a> Explorer<'a> {
             let target_exit = self.find_exit(target_bb, options);
             // FIXME(eddyb) abstract composing `partial`s better.
             exit.partial = exit.partial.or(target_exit.partial);
-            let mut resolve_values = |values: Set1<Use<Node>>| {
+            let mut resolve_values = |values: Set1<INode>| {
                 values.flat_map(|value| {
                     // Constants don't need any propagation work.
                     if self.cx[value].as_const().is_some() {
@@ -534,7 +534,7 @@ impl<'a> Explorer<'a> {
             // Can't assume that a certain `targets` set is final,
             // as there could be outer cycles blocking progress.
             let cx = self.cx;
-            let progress = |old: Set1<Use<Node>>, new: Set1<Use<Node>>| match (old, new) {
+            let progress = |old: Set1<INode>, new: Set1<INode>| match (old, new) {
                 (Set1::One(old), Set1::One(new)) => {
                     if old != new {
                         println!(

@@ -2,7 +2,6 @@ use scoped_tls::scoped_thread_local;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::iter;
-use std::marker::PhantomData;
 use std::mem;
 use std::ops::{Index, RangeTo};
 
@@ -12,54 +11,19 @@ mod store {
 
     use elsa::FrozenVec;
     use std::cell::RefCell;
-    use std::cmp::Ordering;
     use std::collections::hash_map::Entry;
     use std::collections::HashMap;
     use std::convert::TryInto;
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hash;
 
-    pub struct Use<T> {
-        idx: u32,
-        _marker: PhantomData<T>,
-    }
-
-    // HACK(eddyb) work around `#[derive]` adding bounds on `T`.
-    impl<T> Copy for Use<T> {}
-    impl<T> Clone for Use<T> {
-        fn clone(&self) -> Self {
-            *self
-        }
-    }
-
-    impl<T> PartialEq for Use<T> {
-        fn eq(&self, other: &Self) -> bool {
-            self.idx == other.idx
-        }
-    }
-    impl<T> Eq for Use<T> {}
-
-    impl<T> PartialOrd for Use<T> {
-        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            self.idx.partial_cmp(&other.idx)
-        }
-    }
-    impl<T> Ord for Use<T> {
-        fn cmp(&self, other: &Self) -> Ordering {
-            self.idx.cmp(&other.idx)
-        }
-    }
-
-    impl<T> Hash for Use<T> {
-        fn hash<H: Hasher>(&self, state: &mut H) {
-            self.idx.hash(state);
-        }
-    }
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct INode(u32);
 
     // FIXME(eddyb) rename Store to Interner, and adjust adjacent terminology.
 
-    pub struct Store<T> {
+    struct Store<T> {
         // FIXME(Manishearth/elsa#6) switch to `FrozenIndexSet` when available.
-        map: RefCell<HashMap<T, Use<T>>>,
+        map: RefCell<HashMap<T, u32>>,
         vec: FrozenVec<Box<T>>,
     }
 
@@ -77,24 +41,14 @@ mod store {
         }
     }
 
-    impl<T> Index<Use<T>> for Store<T> {
-        type Output = T;
-        fn index(&self, u: Use<T>) -> &T {
-            &self.vec[u.idx as usize]
-        }
-    }
-
     impl<T: Copy + Eq + Hash> Store<T> {
-        fn alloc(&self, x: T) -> Use<T> {
+        fn alloc(&self, x: T) -> u32 {
             match self.map.borrow_mut().entry(x) {
                 Entry::Occupied(entry) => *entry.get(),
                 Entry::Vacant(entry) => {
                     let next = self.vec.len().try_into().unwrap();
                     self.vec.push(Box::new(x));
-                    *entry.insert(Use {
-                        idx: next,
-                        _marker: PhantomData,
-                    })
+                    *entry.insert(next)
                 }
             }
         }
@@ -106,9 +60,9 @@ mod store {
     }
 
     // FIXME(eddyb) is this sort of thing even needed anymore?
-    impl<T: AllocIn<Interned = Use<T>>, F: FnOnce(&Cx) -> T> AllocIn for F {
-        type Interned = Use<T>;
-        fn alloc_in(self, cx: &Cx) -> Use<T> {
+    impl<T: AllocIn<Interned = INode>, F: FnOnce(&Cx) -> T> AllocIn for F {
+        type Interned = INode;
+        fn alloc_in(self, cx: &Cx) -> INode {
             self(cx).alloc_in(cx)
         }
     }
@@ -120,23 +74,23 @@ mod store {
     }
 
     impl AllocIn for Node {
-        type Interned = Use<Self>;
-        fn alloc_in(self, cx: &Cx) -> Use<Self> {
+        type Interned = INode;
+        fn alloc_in(self, cx: &Cx) -> INode {
             match self.normalize(cx) {
-                Ok(x) => cx.stores.node.alloc(x),
-                Err(u) => u,
+                Ok(x) => INode(cx.stores.node.alloc(x)),
+                Err(x) => x,
             }
         }
     }
 
-    impl Index<Use<Node>> for Cx {
+    impl Index<INode> for Cx {
         type Output = Node;
-        fn index(&self, node: Use<Node>) -> &Self::Output {
-            self.stores.node.index(node)
+        fn index(&self, node: INode) -> &Self::Output {
+            &self.stores.node.vec[node.0 as usize]
         }
     }
 
-    impl fmt::Debug for Use<Node> {
+    impl fmt::Debug for INode {
         fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
             let local = if DBG_LOCALS.is_set() {
                 DBG_LOCALS.with(|locals| locals.get(self).copied())
@@ -149,7 +103,7 @@ mod store {
                     if DBG_CX.is_set() {
                         DBG_CX.with(|cx| write!(f, "{:?}", &cx[*self]))
                     } else {
-                        write!(f, "node#{:x}", self.idx)
+                        write!(f, "node#{:x}", self.0)
                     }
                 }
             }
@@ -158,7 +112,7 @@ mod store {
 }
 
 scoped_thread_local!(static DBG_CX: Cx);
-scoped_thread_local!(static DBG_LOCALS: HashMap<Use<Node>, (&'static str, usize)>);
+scoped_thread_local!(static DBG_LOCALS: HashMap<INode, (&'static str, usize)>);
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BitSize {
@@ -228,8 +182,8 @@ impl fmt::Debug for Const {
 }
 
 impl AllocIn for Const {
-    type Interned = Use<Node>;
-    fn alloc_in(self, cx: &Cx) -> Use<Node> {
+    type Interned = INode;
+    fn alloc_in(self, cx: &Cx) -> INode {
         cx.a(Node::Const(self))
     }
 }
@@ -532,8 +486,8 @@ impl MemSize {
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct MemRef {
-    pub mem: Use<Node>,
-    pub addr: Use<Node>,
+    pub mem: INode,
+    pub addr: INode,
     pub size: MemSize,
 }
 
@@ -565,17 +519,17 @@ pub enum Node {
     InReg(Reg),
 
     Const(Const),
-    Int(IntOp, BitSize, Use<Node>, Use<Node>),
-    Trunc(BitSize, Use<Node>),
-    Sext(BitSize, Use<Node>),
-    Zext(BitSize, Use<Node>),
+    Int(IntOp, BitSize, INode, INode),
+    Trunc(BitSize, INode),
+    Sext(BitSize, INode),
+    Zext(BitSize, INode),
 
     Load(MemRef),
 
     // Mem nodes.
     InMem,
 
-    Store(MemRef, Use<Node>),
+    Store(MemRef, INode),
 }
 
 impl fmt::Debug for Node {
@@ -584,7 +538,7 @@ impl fmt::Debug for Node {
             Node::InReg(r) => write!(f, "in.{:?}", r),
             Node::Const(c) => c.fmt(f),
             Node::Int(op, size, a, b) => {
-                let get_inline_node = |node: Use<Node>| {
+                let get_inline_node = |node: INode| {
                     let not_inline =
                         DBG_LOCALS.is_set() && DBG_LOCALS.with(|locals| locals.contains_key(&node));
                     if !not_inline && DBG_CX.is_set() {
@@ -655,28 +609,28 @@ impl fmt::Debug for Node {
 
 impl Node {
     // FIXME(eddyb) should these take `&Cx` instead?
-    pub fn int_neg(v: Use<Node>) -> impl AllocIn<Interned = Use<Self>> {
+    pub fn int_neg(v: INode) -> impl AllocIn<Interned = INode> {
         move |cx: &Cx| {
             let size = cx[v].ty().bit_size().unwrap();
             Node::Int(IntOp::Mul, size, v, cx.a(Const::new(size, size.mask())))
         }
     }
 
-    pub fn int_sub(a: Use<Node>, b: Use<Node>) -> impl AllocIn<Interned = Use<Self>> {
+    pub fn int_sub(a: INode, b: INode) -> impl AllocIn<Interned = INode> {
         move |cx: &Cx| {
             let size = cx[a].ty().bit_size().unwrap();
             Node::Int(IntOp::Add, size, a, cx.a(Node::int_neg(b)))
         }
     }
 
-    pub fn bit_not(v: Use<Node>) -> impl AllocIn<Interned = Use<Self>> {
+    pub fn bit_not(v: INode) -> impl AllocIn<Interned = INode> {
         move |cx: &Cx| {
             let size = cx[v].ty().bit_size().unwrap();
             Node::Int(IntOp::Xor, size, v, cx.a(Const::new(size, size.mask())))
         }
     }
 
-    pub fn bit_rol(v: Use<Node>, n: Use<Node>) -> impl AllocIn<Interned = Use<Self>> {
+    pub fn bit_rol(v: INode, n: INode) -> impl AllocIn<Interned = INode> {
         move |cx: &Cx| {
             let size = cx[v].ty().bit_size().unwrap();
             Node::Int(
@@ -699,7 +653,7 @@ impl Node {
         }
     }
 
-    pub fn bit_ror(v: Use<Node>, n: Use<Node>) -> impl AllocIn<Interned = Use<Self>> {
+    pub fn bit_ror(v: INode, n: INode) -> impl AllocIn<Interned = INode> {
         move |cx: &Cx| {
             let size = cx[v].ty().bit_size().unwrap();
             Node::Int(
@@ -751,10 +705,7 @@ impl Node {
 
     /// Returns `Some(('-', x))` for `x * -1`, and `Some(('!', x))` for `x ^ !0`.
     /// Note that `-1` and `!0` are the same all-ones bitpattern.
-    fn as_unop(
-        &self,
-        get_const: impl FnOnce(Use<Node>) -> Option<Const>,
-    ) -> Option<(char, Use<Node>)> {
+    fn as_unop(&self, get_const: impl FnOnce(INode) -> Option<Const>) -> Option<(char, INode)> {
         if let Node::Int(op, size, a, b) = *self {
             if let IntOp::Mul | IntOp::Xor = op {
                 let all_ones = Const::new(size, size.mask());
@@ -771,7 +722,7 @@ impl Node {
         None
     }
 
-    fn normalize(self, cx: &Cx) -> Result<Self, Use<Self>> {
+    fn normalize(self, cx: &Cx) -> Result<Self, INode> {
         // TODO(eddyb) resolve loads.
 
         if let Node::Const(c) = self {
@@ -1006,7 +957,7 @@ impl Node {
 pub trait Visitor: Sized {
     fn cx(&self) -> &Cx;
 
-    fn visit_node(&mut self, node: Use<Node>) {
+    fn visit_node(&mut self, node: INode) {
         node.walk(self);
     }
 }
@@ -1042,7 +993,7 @@ impl<T: Visit> Visit for Option<T> {
     }
 }
 
-impl Visit for Use<Node> {
+impl Visit for INode {
     fn walk(&self, visitor: &mut impl Visitor) {
         let node = visitor.cx()[*self];
         node.visit(visitor);
@@ -1075,7 +1026,7 @@ impl Visit for Node {
     }
 }
 
-impl Use<Node> {
+impl INode {
     pub fn subst(self, cx: &Cx, base: &State) -> Self {
         cx.a(match cx[self] {
             Node::InReg(r) => return base.regs[r.index],
@@ -1098,10 +1049,10 @@ impl Use<Node> {
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum Effect {
-    Jump(Use<Node>),
+    Jump(INode),
 
     // FIXME(eddyb) support this better, add Node args, etc.
-    Opaque { call: String, next_pc: Use<Node> },
+    Opaque { call: String, next_pc: INode },
 
     Error(String),
 }
@@ -1132,8 +1083,8 @@ impl Visit for Effect {
 
 #[derive(Clone)]
 pub struct State {
-    pub mem: Use<Node>,
-    pub regs: Vec<Use<Node>>,
+    pub mem: INode,
+    pub regs: Vec<INode>,
 
     // FIXME(eddyb) intern this information.
     pub reg_defs: Vec<Reg>,
@@ -1168,7 +1119,7 @@ impl Visit for Edge {
 #[derive(Copy, Clone)]
 pub enum Edges<T> {
     One(T),
-    Branch { cond: Use<Node>, t: T, e: T },
+    Branch { cond: INode, t: T, e: T },
 }
 
 impl<T: fmt::Debug> fmt::Debug for Edges<T> {
@@ -1273,11 +1224,11 @@ impl Cx {
         edge_states_and_values: Edges<(Option<&'a State>, &'a (impl Visit + fmt::Debug))>,
     ) -> impl fmt::Display + 'a {
         struct Data {
-            use_counts: HashMap<Use<Node>, usize>,
+            use_counts: HashMap<INode, usize>,
             numbered_counts: HashMap<&'static str, usize>,
-            locals: HashMap<Use<Node>, (&'static str, usize)>,
-            val_to_state_regs: HashMap<Use<Node>, Vec<Reg>>,
-            state_mem: Option<Use<Node>>,
+            locals: HashMap<INode, (&'static str, usize)>,
+            val_to_state_regs: HashMap<INode, Vec<Reg>>,
+            state_mem: Option<INode>,
         }
 
         struct UseCounter<'a> {
@@ -1290,7 +1241,7 @@ impl Cx {
                 self.cx
             }
 
-            fn visit_node(&mut self, node: Use<Node>) {
+            fn visit_node(&mut self, node: INode) {
                 let count = self.data.use_counts.entry(node).or_insert(0);
                 *count += 1;
                 if *count == 1 {
@@ -1310,7 +1261,7 @@ impl Cx {
                 self.cx
             }
 
-            fn visit_node(&mut self, node: Use<Node>) {
+            fn visit_node(&mut self, node: INode) {
                 if self.data.locals.contains_key(&node) {
                     return;
                 }
@@ -1370,7 +1321,7 @@ impl Cx {
             cx: &'a Cx,
             data: &'a Data,
             fmt: &'a mut F,
-            seen: HashSet<Use<Node>>,
+            seen: HashSet<INode>,
             empty: bool,
         }
 
@@ -1389,7 +1340,7 @@ impl Cx {
                 self.cx
             }
 
-            fn visit_node(&mut self, node: Use<Node>) {
+            fn visit_node(&mut self, node: INode) {
                 if !self.seen.insert(node) {
                     return;
                 }
