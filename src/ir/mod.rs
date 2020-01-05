@@ -3,120 +3,10 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::iter;
 use std::mem;
-use std::ops::{Index, RangeTo};
+use std::ops::RangeTo;
 
-pub use self::intern::*;
-mod intern {
-    use super::*;
-
-    use elsa::FrozenVec;
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    use std::convert::TryInto;
-    use std::hash::Hash;
-    use std::rc::Rc;
-
-    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct INode(u32);
-
-    struct Interner<T> {
-        // FIXME(Manishearth/elsa#6) switch to `FrozenIndexSet` when available.
-        map: RefCell<HashMap<Rc<T>, u32>>,
-        vec: FrozenVec<Rc<T>>,
-    }
-
-    #[derive(Default)]
-    pub(super) struct Interners {
-        node: Interner<Node>,
-    }
-
-    impl<T: Eq + Hash> Default for Interner<T> {
-        fn default() -> Self {
-            Interner {
-                map: Default::default(),
-                vec: Default::default(),
-            }
-        }
-    }
-
-    impl<T: Eq + Hash> Interner<T> {
-        fn intern(&self, value: impl AsRef<T> + Into<Rc<T>>) -> u32 {
-            if let Some(&i) = self.map.borrow().get(value.as_ref()) {
-                return i;
-            }
-            let value = value.into();
-            let next = self.vec.len().try_into().unwrap();
-            self.map.borrow_mut().insert(value.clone(), next);
-            self.vec.push(value);
-            next
-        }
-    }
-
-    pub trait InternInCx: Sized {
-        type Interned;
-
-        fn intern_in_cx(self, cx: &Cx) -> Self::Interned;
-    }
-
-    // FIXME(eddyb) is this sort of thing even needed anymore?
-    impl<T: InternInCx<Interned = INode>, F: FnOnce(&Cx) -> T> InternInCx for F {
-        type Interned = INode;
-
-        fn intern_in_cx(self, cx: &Cx) -> INode {
-            self(cx).intern_in_cx(cx)
-        }
-    }
-
-    impl Cx {
-        pub fn a<T: InternInCx>(&self, x: T) -> T::Interned {
-            x.intern_in_cx(self)
-        }
-    }
-
-    // FIXME(eddyb) automate this away somehow.
-    impl AsRef<Self> for Node {
-        fn as_ref(&self) -> &Self {
-            self
-        }
-    }
-
-    impl InternInCx for Node {
-        type Interned = INode;
-        fn intern_in_cx(self, cx: &Cx) -> INode {
-            match self.normalize(cx) {
-                Ok(x) => INode(cx.interners.node.intern(x)),
-                Err(x) => x,
-            }
-        }
-    }
-
-    impl Index<INode> for Cx {
-        type Output = Node;
-        fn index(&self, node: INode) -> &Self::Output {
-            &self.interners.node.vec[node.0 as usize]
-        }
-    }
-
-    impl fmt::Debug for INode {
-        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            let local = if DBG_LOCALS.is_set() {
-                DBG_LOCALS.with(|locals| locals.get(self).copied())
-            } else {
-                None
-            };
-            match local {
-                Some((prefix, i)) => write!(f, "{}{}", prefix, i),
-                None => {
-                    if DBG_CX.is_set() {
-                        DBG_CX.with(|cx| write!(f, "{:?}", &cx[*self]))
-                    } else {
-                        write!(f, "node#{:x}", self.0)
-                    }
-                }
-            }
-        }
-    }
-}
+mod context;
+pub use self::context::{Cx, INode, InternInCx};
 
 scoped_thread_local!(static DBG_CX: Cx);
 scoped_thread_local!(static DBG_LOCALS: HashMap<INode, (&'static str, usize)>);
@@ -1192,18 +1082,6 @@ impl<T> Edges<T> {
 pub struct Block {
     pub pc: RangeTo<Const>,
     pub edges: Edges<Edge>,
-}
-
-pub struct Cx {
-    interners: Interners,
-}
-
-impl Cx {
-    pub fn new() -> Self {
-        Cx {
-            interners: Interners::default(),
-        }
-    }
 }
 
 impl Cx {
