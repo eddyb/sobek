@@ -20,10 +20,10 @@ pub trait InternInCx {
 }
 
 // FIXME(eddyb) is this sort of thing even needed anymore?
-impl<T: InternInCx<Interned = INode>, F: FnOnce(&Cx) -> T> InternInCx for F {
-    type Interned = INode;
+impl<T: InternInCx, F: FnOnce(&Cx) -> T> InternInCx for F {
+    type Interned = T::Interned;
 
-    fn intern_in_cx(self, cx: &Cx) -> INode {
+    fn intern_in_cx(self, cx: &Cx) -> T::Interned {
         self(cx).intern_in_cx(cx)
     }
 }
@@ -93,8 +93,36 @@ macro_rules! interners {
 }
 
 interners! {
+    IStr => str,
     IReg => Reg,
     INode => Node,
+}
+
+impl InternInCx for &'_ str {
+    type Interned = IStr;
+    fn intern_in_cx(self, cx: &Cx) -> IStr {
+        IStr(cx.interners.IStr.intern(self))
+    }
+}
+
+impl fmt::Display for IStr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if super::DBG_CX.is_set() {
+            super::DBG_CX.with(|cx| write!(f, "{}", &cx[*self]))
+        } else {
+            write!(f, "str#{:x}", self.0)
+        }
+    }
+}
+
+impl fmt::Debug for IStr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if super::DBG_CX.is_set() {
+            super::DBG_CX.with(|cx| write!(f, "{:?}", &cx[*self]))
+        } else {
+            write!(f, "str#{:x}", self.0)
+        }
+    }
 }
 
 // FIXME(eddyb) automate this away somehow.

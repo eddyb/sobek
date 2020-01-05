@@ -30,35 +30,31 @@ impl Isa for I8051 {
         B16
     }
 
-    fn regs(&self) -> Vec<crate::ir::Reg> {
+    fn regs(&self, cx: &Cx) -> Vec<crate::ir::Reg> {
         (0..0x80)
-            .map(|i| {
-                crate::ir::Reg {
-                    index: i,
-                    size: B8,
-                    name: if i == Reg::SP as usize {
-                        "sp"
-                    } else if i == Reg::DPL as usize {
-                        "dpl"
-                    } else if i == Reg::DPH as usize {
-                        "dph"
-                    } else if i == Reg::PSW as usize {
-                        "psw"
-                    } else if i == Reg::A as usize {
-                        "a"
-                    } else if i == Reg::B as usize {
-                        "b"
-                    } else {
-                        // HACK(eddyb) leak a dynamically allocated string
-                        // to avoid having to hardcode all the register names.
-                        Box::leak(format!("sfr_{:02x}", i).into_boxed_str())
-                    },
-                }
+            .map(|i| crate::ir::Reg {
+                index: i,
+                size: B8,
+                name: if i == Reg::SP as usize {
+                    cx.a("sp")
+                } else if i == Reg::DPL as usize {
+                    cx.a("dpl")
+                } else if i == Reg::DPH as usize {
+                    cx.a("dph")
+                } else if i == Reg::PSW as usize {
+                    cx.a("psw")
+                } else if i == Reg::A as usize {
+                    cx.a("a")
+                } else if i == Reg::B as usize {
+                    cx.a("b")
+                } else {
+                    cx.a(&format!("sfr_{:02x}", i)[..])
+                },
             })
             .chain(iter::once(crate::ir::Reg {
                 index: Reg::PSW_C as usize,
                 size: B1,
-                name: "psw.c",
+                name: cx.a("psw.c"),
             }))
             .collect()
     }

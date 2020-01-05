@@ -6,10 +6,10 @@ use std::mem;
 use std::ops::RangeTo;
 
 mod context;
-pub use self::context::{Cx, INode, IReg, InternInCx};
+pub use self::context::{Cx, INode, IReg, IStr, InternInCx};
 
 scoped_thread_local!(static DBG_CX: Cx);
-scoped_thread_local!(static DBG_LOCALS: HashMap<INode, (&'static str, usize)>);
+scoped_thread_local!(static DBG_LOCALS: HashMap<INode, (IStr, usize)>);
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BitSize {
@@ -320,7 +320,7 @@ pub struct Reg {
     // FIXME(eddyb) stop using indices for registers.
     pub index: usize,
     pub size: BitSize,
-    pub name: &'static str,
+    pub name: IStr,
 }
 
 impl fmt::Debug for Reg {
@@ -1112,8 +1112,8 @@ impl Cx {
     ) -> impl fmt::Display + 'a {
         struct Data {
             use_counts: HashMap<INode, usize>,
-            numbered_counts: HashMap<&'static str, usize>,
-            locals: HashMap<INode, (&'static str, usize)>,
+            numbered_counts: HashMap<IStr, usize>,
+            locals: HashMap<INode, (IStr, usize)>,
             val_to_state_regs: HashMap<INode, Vec<IReg>>,
             state_mem: Option<INode>,
         }
@@ -1193,8 +1193,9 @@ impl Cx {
                 };
                 if !inline {
                     let prefix = match self.cx[node].ty(self.cx) {
-                        Type::Bits(_) => "v",
-                        Type::Mem => "m",
+                        // FIXME(eddyb) pre-intern.
+                        Type::Bits(_) => self.cx.a("v"),
+                        Type::Mem => self.cx.a("m"),
                     };
                     let numbered_count = self.data.numbered_counts.entry(prefix).or_default();
                     let next = *numbered_count;

@@ -247,7 +247,7 @@ impl<'a> Explorer<'a> {
             let reg_defs: Vec<_> = self
                 .platform
                 .isa()
-                .regs()
+                .regs(self.cx)
                 .into_iter()
                 .map(|r| self.cx.a(r))
                 .collect();

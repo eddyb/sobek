@@ -86,17 +86,17 @@ impl Isa for Mips32 {
         B32
     }
 
-    fn regs(&self) -> Vec<crate::ir::Reg> {
+    fn regs(&self, cx: &Cx) -> Vec<crate::ir::Reg> {
         let lower = (&GPR_NAMES.0, &MUL_DIV_REG_NAMES.0);
         let upper = (&GPR_NAMES.1, &MUL_DIV_REG_NAMES.1);
         [lower, upper]
             .iter()
             .flat_map(|&(gpr_names, mul_div_reg_names)| gpr_names.iter().chain(mul_div_reg_names))
             .enumerate()
-            .map(move |(index, name)| crate::ir::Reg {
+            .map(move |(index, &name)| crate::ir::Reg {
                 index,
                 size: B32,
-                name,
+                name: cx.a(name),
             })
             .collect()
     }

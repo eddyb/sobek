@@ -72,20 +72,20 @@ impl Isa for I8080 {
         B16
     }
 
-    fn regs(&self) -> Vec<crate::ir::Reg> {
+    fn regs(&self, cx: &Cx) -> Vec<crate::ir::Reg> {
         iter::once(crate::ir::Reg {
             index: Reg::A as usize,
             size: B8,
-            name: "a",
+            name: cx.a("a"),
         })
         .chain(
             ["bc", "de", "hl", "sp"]
                 .iter()
                 .enumerate()
-                .map(|(i, name)| crate::ir::Reg {
+                .map(|(i, &name)| crate::ir::Reg {
                     index: Reg::BC as usize + i,
                     size: B16,
-                    name,
+                    name: cx.a(name),
                 }),
         )
         .chain(
@@ -94,16 +94,16 @@ impl Isa for I8080 {
             ["f.c", "f.h", "f.n", "f.z", "f.s", "f.p"]
                 .iter()
                 .enumerate()
-                .map(|(i, name)| crate::ir::Reg {
+                .map(|(i, &name)| crate::ir::Reg {
                     index: Reg::F_C as usize + i,
                     size: B1,
-                    name,
+                    name: cx.a(name),
                 }),
         )
         .chain(iter::once(crate::ir::Reg {
             index: Reg::IE as usize,
             size: B1,
-            name: "ie",
+            name: cx.a("ie"),
         }))
         .collect()
     }
