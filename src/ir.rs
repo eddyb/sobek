@@ -11,18 +11,18 @@ mod intern {
 
     use elsa::FrozenVec;
     use std::cell::RefCell;
-    use std::collections::hash_map::Entry;
     use std::collections::HashMap;
     use std::convert::TryInto;
     use std::hash::Hash;
+    use std::rc::Rc;
 
     #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct INode(u32);
 
     struct Interner<T> {
         // FIXME(Manishearth/elsa#6) switch to `FrozenIndexSet` when available.
-        map: RefCell<HashMap<T, u32>>,
-        vec: FrozenVec<Box<T>>,
+        map: RefCell<HashMap<Rc<T>, u32>>,
+        vec: FrozenVec<Rc<T>>,
     }
 
     #[derive(Default)]
@@ -39,16 +39,16 @@ mod intern {
         }
     }
 
-    impl<T: Copy + Eq + Hash> Interner<T> {
-        fn intern(&self, x: T) -> u32 {
-            match self.map.borrow_mut().entry(x) {
-                Entry::Occupied(entry) => *entry.get(),
-                Entry::Vacant(entry) => {
-                    let next = self.vec.len().try_into().unwrap();
-                    self.vec.push(Box::new(x));
-                    *entry.insert(next)
-                }
+    impl<T: Eq + Hash> Interner<T> {
+        fn intern(&self, value: impl AsRef<T> + Into<Rc<T>>) -> u32 {
+            if let Some(&i) = self.map.borrow().get(value.as_ref()) {
+                return i;
             }
+            let value = value.into();
+            let next = self.vec.len().try_into().unwrap();
+            self.map.borrow_mut().insert(value.clone(), next);
+            self.vec.push(value);
+            next
         }
     }
 
@@ -70,6 +70,13 @@ mod intern {
     impl Cx {
         pub fn a<T: InternInCx>(&self, x: T) -> T::Interned {
             x.intern_in_cx(self)
+        }
+    }
+
+    // FIXME(eddyb) automate this away somehow.
+    impl AsRef<Self> for Node {
+        fn as_ref(&self) -> &Self {
+            self
         }
     }
 
