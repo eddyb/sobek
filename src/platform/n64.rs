@@ -1,5 +1,6 @@
-use crate::ir::{BitSize, Const, MemSize, RawRom, Rom, SimplePlatform, UnsupportedAddress};
+use crate::ir::{BitSize, Const, MemSize};
 use crate::isa::mips::{AddrSpace, Mips32};
+use crate::platform::{RawRom, Rom, SimplePlatform, UnsupportedAddress};
 
 pub struct Cartridge {
     pub raw: RawRom<Vec<u8>>,

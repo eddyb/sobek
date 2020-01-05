@@ -1,7 +1,9 @@
 use crate::ir::{
     BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, IntOp, Isa, MemRef, MemSize, Node, State, Type,
+    Const, Cx, Edge, Edges, Effect, IntOp, MemRef, MemSize, Node, State, Type,
 };
+use crate::isa::Isa;
+use crate::platform::Rom;
 use std::iter;
 
 pub struct I8051;
@@ -61,7 +63,13 @@ impl Isa for I8051 {
             .collect()
     }
 
-    fn lift_instr(&self, cx: &Cx, pc: &mut Const, mut state: State) -> Result<State, Edges<Edge>> {
+    fn lift_instr(
+        &self,
+        cx: &Cx,
+        rom: &dyn Rom,
+        pc: &mut Const,
+        mut state: State,
+    ) -> Result<State, Edges<Edge>> {
         let add1 = |x| IntOp::Add.eval(x, Const::new(x.size, 1)).unwrap();
 
         macro_rules! error {
@@ -75,7 +83,7 @@ impl Isa for I8051 {
 
         macro_rules! imm {
             (8) => {{
-                let v = match cx.platform.rom().load(*pc, MemSize::M8) {
+                let v = match rom.load(*pc, MemSize::M8) {
                     Ok(v) => v,
                     Err(e) => error!("failed to read ROM: {:?}", e),
                 };
@@ -538,7 +546,7 @@ impl Isa for I8051 {
                         // until proper support is added for Harvard architectures.
                         if let Some(addr) = cx[addr].as_const() {
                             state.regs[Reg::A as usize] =
-                                cx.a(cx.platform.rom().load(addr, MemSize::M8).unwrap());
+                                cx.a(rom.load(addr, MemSize::M8).unwrap());
                         } else {
                             // HACK(eddyb) this uses a B16 memory address to
                             // avoid accidentally aliasing B8 memory addresses.

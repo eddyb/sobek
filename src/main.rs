@@ -1,15 +1,18 @@
 use sobek::explore::Explorer;
-use sobek::ir::{BitSize, Const, Cx, Platform, RawRom, SimplePlatform};
+use sobek::ir::{BitSize, Const, Cx};
 use sobek::isa::i8051::I8051;
 use sobek::isa::i8080::I8080;
 use sobek::isa::mips::Mips32;
-use sobek::platform::n64::{self, N64};
+use sobek::isa::Isa;
+use sobek::platform::n64;
+use sobek::platform::{RawRom, Rom, SimplePlatform};
 use std::iter;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-fn analyze_and_dump<P: Platform + 'static>(platform: P, entries: impl Iterator<Item = Const>) {
-    let cx = Cx::new(platform);
+fn analyze_and_dump(isa: impl Isa, rom: impl Rom, entries: impl Iterator<Item = Const>) {
+    let cx = Cx::new();
+    let platform = SimplePlatform { isa, rom };
 
     let cancel_token = Arc::new(AtomicBool::new(false));
     let ctrcc_result = {
@@ -25,7 +28,7 @@ fn analyze_and_dump<P: Platform + 'static>(platform: P, entries: impl Iterator<I
     }
     let cancel_token = ctrcc_result.ok().map(|_| &*cancel_token);
 
-    let mut explorer = Explorer::new(&cx, cancel_token);
+    let mut explorer = Explorer::new(&cx, &platform, cancel_token);
     for entry_pc in entries {
         explorer.explore_bbs(entry_pc);
     }
@@ -35,7 +38,7 @@ fn analyze_and_dump<P: Platform + 'static>(platform: P, entries: impl Iterator<I
     let nester = sobek::nest::Nester::new(&explorer);
 
     let mut nested_pc = ..Const::new(
-        cx.platform.isa().addr_size(),
+        platform.isa.addr_size(),
         explorer.blocks.keys().next().unwrap().entry_pc,
     );
     let mut last_end = nested_pc.end.as_u64();
@@ -57,40 +60,34 @@ fn main() {
     match &isa[..] {
         "8051" => {
             analyze_and_dump(
-                SimplePlatform {
-                    isa: I8051,
-                    rom: RawRom {
-                        big_endian: false,
-                        data,
-                    },
+                I8051,
+                RawRom {
+                    big_endian: false,
+                    data,
                 },
                 iter::once(Const::new(BitSize::B16, 0)),
             );
         }
         "8080" => {
             analyze_and_dump(
-                SimplePlatform {
-                    isa: I8080 {
-                        flavor: sobek::isa::i8080::Flavor::Intel,
-                    },
-                    rom: RawRom {
-                        big_endian: false,
-                        data,
-                    },
+                I8080 {
+                    flavor: sobek::isa::i8080::Flavor::Intel,
+                },
+                RawRom {
+                    big_endian: false,
+                    data,
                 },
                 iter::once(Const::new(BitSize::B16, 0)),
             );
         }
         "gb" => {
             analyze_and_dump(
-                SimplePlatform {
-                    isa: I8080 {
-                        flavor: sobek::isa::i8080::Flavor::LR35902,
-                    },
-                    rom: RawRom {
-                        big_endian: false,
-                        data,
-                    },
+                I8080 {
+                    flavor: sobek::isa::i8080::Flavor::LR35902,
+                },
+                RawRom {
+                    big_endian: false,
+                    data,
                 },
                 iter::once(0x100)
                     .chain((0..5).map(|i| 0x40 + i * 8))
@@ -103,7 +100,7 @@ fn main() {
                 data,
             });
             let entry_pc = rom.base;
-            analyze_and_dump(N64 { isa: Mips32, rom }, iter::once(entry_pc));
+            analyze_and_dump(Mips32, rom, iter::once(entry_pc));
         }
         _ => panic!("unsupport isa {:?}", isa),
     }

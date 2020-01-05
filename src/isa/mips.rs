@@ -1,7 +1,9 @@
 use crate::ir::{
     BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, IntOp, Isa, MemRef, MemSize, Node, State, Type, Use,
+    Const, Cx, Edge, Edges, Effect, IntOp, MemRef, MemSize, Node, State, Type, Use,
 };
+use crate::isa::Isa;
+use crate::platform::Rom;
 
 pub struct Mips32;
 
@@ -99,7 +101,13 @@ impl Isa for Mips32 {
             .collect()
     }
 
-    fn lift_instr(&self, cx: &Cx, pc: &mut Const, mut state: State) -> Result<State, Edges<Edge>> {
+    fn lift_instr(
+        &self,
+        cx: &Cx,
+        rom: &dyn Rom,
+        pc: &mut Const,
+        mut state: State,
+    ) -> Result<State, Edges<Edge>> {
         macro_rules! error {
             ($($args:tt)*) => {
                 return Err(Edges::One(Edge {
@@ -109,7 +117,7 @@ impl Isa for Mips32 {
             }
         }
 
-        let instr = match cx.platform.rom().load(*pc, MemSize::M32) {
+        let instr = match rom.load(*pc, MemSize::M32) {
             Ok(x) => x.as_u32(),
             Err(e) => error!("failed to read ROM: {:?}", e),
         };
@@ -144,7 +152,7 @@ impl Isa for Mips32 {
             ($target:expr) => {{
                 let target = $target;
                 // Process delay slot.
-                match self.lift_instr(cx, pc, state) {
+                match self.lift_instr(cx, rom, pc, state) {
                     Ok(state) => Err(Edges::One(Edge {
                         state,
                         effect: Effect::Jump(target),
@@ -192,7 +200,7 @@ impl Isa for Mips32 {
                 assert_eq!(cx[cond].ty(), Type::Bits(B1));
 
                 // Process delay slot.
-                match self.lift_instr(cx, pc, state) {
+                match self.lift_instr(cx, rom, pc, state) {
                     Ok(state) => Err(Edges::Branch {
                         cond,
                         t: Edge { state: state.clone(), effect: Effect::Jump(t) },

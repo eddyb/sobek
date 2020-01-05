@@ -2,6 +2,7 @@ use crate::ir::{
     BitSize, Block, Const, Cx, Edge, Edges, Effect, MemRef, MemSize, Node, State, Use, Visit,
     Visitor,
 };
+use crate::platform::{Platform, Rom};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -82,17 +83,18 @@ impl Use<Node> {
     fn subst_reduce_load(
         self,
         cx: &Cx,
+        rom: &dyn Rom,
         base: Option<&State>,
         addr: Use<Node>,
         size: MemSize,
     ) -> Use<Node> {
         match cx[self] {
             Node::InMem => match base {
-                Some(base) => base.mem.subst_reduce_load(cx, None, addr, size),
+                Some(base) => base.mem.subst_reduce_load(cx, rom, None, addr, size),
                 None => {
                     // HACK(eddyb) assume it's from the ROM, if in range of it.
                     if let Some(addr) = cx[addr].as_const() {
-                        if let Ok(v) = cx.platform.rom().load(addr, size) {
+                        if let Ok(v) = rom.load(addr, size) {
                             return cx.a(v);
                         }
                     }
@@ -106,10 +108,10 @@ impl Use<Node> {
             },
 
             Node::Store(r, v) => {
-                if r.addr.subst_reduce(cx, base) == addr && r.size == size {
-                    v.subst_reduce(cx, base)
+                if r.addr.subst_reduce(cx, rom, base) == addr && r.size == size {
+                    v.subst_reduce(cx, rom, base)
                 } else {
-                    r.mem.subst_reduce_load(cx, base, addr, size)
+                    r.mem.subst_reduce_load(cx, rom, base, addr, size)
                 }
             }
 
@@ -120,34 +122,37 @@ impl Use<Node> {
 
 // FIXME(eddyb) introduce a more general "folder" abstraction.
 impl Use<Node> {
-    fn subst_reduce(self, cx: &Cx, base: Option<&State>) -> Self {
+    fn subst_reduce(self, cx: &Cx, rom: &dyn Rom, base: Option<&State>) -> Self {
         cx.a(match cx[self] {
             Node::InReg(r) => {
-                return base.map_or(self, |base| base.regs[r.index].subst_reduce(cx, None))
+                return base.map_or(self, |base| base.regs[r.index].subst_reduce(cx, rom, None))
             }
 
             Node::Const(_) => return self,
 
-            Node::Int(op, size, a, b) => {
-                Node::Int(op, size, a.subst_reduce(cx, base), b.subst_reduce(cx, base))
-            }
-            Node::Trunc(size, x) => Node::Trunc(size, x.subst_reduce(cx, base)),
-            Node::Sext(size, x) => Node::Sext(size, x.subst_reduce(cx, base)),
-            Node::Zext(size, x) => Node::Zext(size, x.subst_reduce(cx, base)),
+            Node::Int(op, size, a, b) => Node::Int(
+                op,
+                size,
+                a.subst_reduce(cx, rom, base),
+                b.subst_reduce(cx, rom, base),
+            ),
+            Node::Trunc(size, x) => Node::Trunc(size, x.subst_reduce(cx, rom, base)),
+            Node::Sext(size, x) => Node::Sext(size, x.subst_reduce(cx, rom, base)),
+            Node::Zext(size, x) => Node::Zext(size, x.subst_reduce(cx, rom, base)),
             Node::Load(r) => {
-                let addr = r.addr.subst_reduce(cx, base);
-                return r.mem.subst_reduce_load(cx, base, addr, r.size);
+                let addr = r.addr.subst_reduce(cx, rom, base);
+                return r.mem.subst_reduce_load(cx, rom, base, addr, r.size);
             }
 
-            Node::InMem => return base.map_or(self, |base| base.mem.subst_reduce(cx, None)),
+            Node::InMem => return base.map_or(self, |base| base.mem.subst_reduce(cx, rom, None)),
 
             Node::Store(r, x) => Node::Store(
                 MemRef {
-                    mem: r.mem.subst_reduce(cx, base),
-                    addr: r.addr.subst_reduce(cx, base),
+                    mem: r.mem.subst_reduce(cx, rom, base),
+                    addr: r.addr.subst_reduce(cx, rom, base),
                     size: r.size,
                 },
-                x.subst_reduce(cx, base),
+                x.subst_reduce(cx, rom, base),
             ),
         })
     }
@@ -199,6 +204,7 @@ impl Exit {
 
 pub struct Explorer<'a> {
     pub cx: &'a Cx,
+    pub platform: &'a dyn Platform,
     pub blocks: BTreeMap<BlockId, Block>,
 
     /// Analysis output indicating that a block takes a "continuation" which is
@@ -216,9 +222,14 @@ pub struct Explorer<'a> {
 }
 
 impl<'a> Explorer<'a> {
-    pub fn new(cx: &'a Cx, cancel_token: Option<&'a AtomicBool>) -> Self {
+    pub fn new(
+        cx: &'a Cx,
+        platform: &'a dyn Platform,
+        cancel_token: Option<&'a AtomicBool>,
+    ) -> Self {
         Explorer {
             cx,
+            platform,
             blocks: BTreeMap::new(),
             takes_static_continuation: HashSet::new(),
             eventual_static_continuation: HashMap::new(),
@@ -231,7 +242,7 @@ impl<'a> Explorer<'a> {
         // FIXME(eddyb) clean this up whenever NLL/Polonius can do the
         // efficient check (`if let Some(x) = map.get(k) { return x; }`).
         while !self.blocks.contains_key(&bb) {
-            let reg_defs = self.cx.platform.isa().regs();
+            let reg_defs = self.platform.isa().regs();
             let mut state = State {
                 mem: self.cx.a(Node::InMem),
                 regs: reg_defs
@@ -240,9 +251,13 @@ impl<'a> Explorer<'a> {
                     .collect(),
                 reg_defs,
             };
-            let mut pc = Const::new(self.cx.platform.isa().addr_size(), bb.entry_pc);
+            let mut pc = Const::new(self.platform.isa().addr_size(), bb.entry_pc);
             let edges = loop {
-                match self.cx.platform.isa().lift_instr(self.cx, &mut pc, state) {
+                match self
+                    .platform
+                    .isa()
+                    .lift_instr(self.cx, self.platform.rom(), &mut pc, state)
+                {
                     Ok(new_state) => state = new_state,
                     Err(edges) => break edges,
                 }
@@ -338,10 +353,11 @@ impl<'a> Explorer<'a> {
                 next_pc: direct_target,
                 ..
             } => Exit {
-                targets: Set1::One(direct_target.subst_reduce(self.cx, None)),
+                targets: Set1::One(direct_target.subst_reduce(self.cx, self.platform.rom(), None)),
                 arg_values: options.arg_value.map_or(Set1::Empty, |arg_value| {
                     Set1::One(arg_value.subst_reduce(
                         self.cx,
+                        self.platform.rom(),
                         Some(&self.blocks[&bb].edges.as_ref().get(br_cond).state),
                     ))
                 }),
@@ -422,6 +438,7 @@ impl<'a> Explorer<'a> {
                     values.map(|arg_value| {
                         arg_value.subst_reduce(
                             self.cx,
+                            self.platform.rom(),
                             Some(&self.blocks[&bb].edges.as_ref().get(br_cond).state),
                         )
                     })
