@@ -40,7 +40,7 @@ macro_rules! reg_names {
 }
 
 const GPR_NAMES: ([&str; 32], [&str; 32]) = reg_names![
-    zero
+    zero__THIS_SHOULD_NEVER_BE_USED
     at
     rv0 rv1
     a0 a1 a2 a3
@@ -63,7 +63,16 @@ enum Reg {
 
 const NUM_REGS: usize = 32 + 2;
 
+// FIXME(eddyb) make a `State` wrapper to contain these helpers.
 impl State {
+    fn get(&self, cx: &Cx, r: usize) -> Use<Node> {
+        if r == 0 || r == NUM_REGS {
+            cx.a(Const::new(B32, 0))
+        } else {
+            self.regs[r]
+        }
+    }
+
     fn set(&mut self, r: usize, v: Use<Node>) {
         if r != 0 && r != NUM_REGS {
             self.regs[r] = v;
@@ -130,8 +139,6 @@ impl Isa for Mips32 {
         };
         let imm = Const::new(B32, instr as i16 as i32 as u32 as u64);
         let uimm = Const::new(B32, instr as u16 as u64);
-        // FIXME(eddyb) ensure more aggressively that this is always 0.
-        let zero = state.regs[0];
 
         macro_rules! node {
             ($name:ident($($arg:expr),*)) => {
@@ -256,12 +263,12 @@ impl Isa for Mips32 {
                         node!(Int(
                             IntOp::Shl,
                             B64,
-                            node!(Zext(B64, state.regs[NUM_REGS + i])),
+                            node!(Zext(B64, state.get(cx, NUM_REGS + i))),
                             cx.a(Const::new(B8, 32))
                         )),
-                        node!(Zext(B64, state.regs[i]))
+                        node!(Zext(B64, state.get(cx, i)))
                     )),
-                    B32 => state.regs[i],
+                    B32 => state.get(cx, i),
                     _ => unreachable!(),
                 }
             }};
@@ -392,10 +399,14 @@ impl Isa for Mips32 {
             set_reg_maybe64!(rd, v);
         } else if op == 1 {
             // REGIMM (I format w/o rt).
-            let rs = state.regs[rs];
+            let rs = state.get(cx, rs);
             match rt {
-                0 => return branch!(node!(Int(IntOp::LtS, B32, rs, zero)) => true),
-                1 => return branch!(node!(Int(IntOp::LtS, B32, rs, zero)) => false),
+                0 => {
+                    return branch!(node!(Int(IntOp::LtS, B32, rs, cx.a(Const::new(B32, 0)))) => true)
+                }
+                1 => {
+                    return branch!(node!(Int(IntOp::LtS, B32, rs, cx.a(Const::new(B32, 0)))) => false)
+                }
                 _ => error!("unknown REGIMM rt={}", rt),
             }
         } else if op == 2 || op == 3 {
@@ -451,7 +462,7 @@ impl Isa for Mips32 {
             }
 
             let rd = rt;
-            let rs = state.regs[rs];
+            let rs = state.get(cx, rs);
             let rt = get_reg_maybe64!(rt);
 
             macro_rules! mem_ref {
@@ -469,8 +480,12 @@ impl Isa for Mips32 {
                 // the branch is taken (the specs talk about "nullification").
                 4 | 20 => return branch!(node!(Int(IntOp::Eq, B32, rs, rt)) => true),
                 5 | 21 => return branch!(node!(Int(IntOp::Eq, B32, rs, rt)) => false),
-                6 | 22 => return branch!(node!(Int(IntOp::LtS, B32, zero, rs)) => false),
-                7 | 23 => return branch!(node!(Int(IntOp::LtS, B32, zero, rs)) => true),
+                6 | 22 => {
+                    return branch!(node!(Int(IntOp::LtS, B32, cx.a(Const::new(B32, 0)), rs)) => false)
+                }
+                7 | 23 => {
+                    return branch!(node!(Int(IntOp::LtS, B32, cx.a(Const::new(B32, 0)), rs)) => true)
+                }
 
                 8..=14 => {
                     let op = match op {
