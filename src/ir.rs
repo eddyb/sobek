@@ -5,8 +5,8 @@ use std::iter;
 use std::mem;
 use std::ops::{Index, RangeTo};
 
-pub use self::store::*;
-mod store {
+pub use self::intern::*;
+mod intern {
     use super::*;
 
     use elsa::FrozenVec;
@@ -19,30 +19,28 @@ mod store {
     #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct INode(u32);
 
-    // FIXME(eddyb) rename Store to Interner, and adjust adjacent terminology.
-
-    struct Store<T> {
+    struct Interner<T> {
         // FIXME(Manishearth/elsa#6) switch to `FrozenIndexSet` when available.
         map: RefCell<HashMap<T, u32>>,
         vec: FrozenVec<Box<T>>,
     }
 
     #[derive(Default)]
-    pub(super) struct Stores {
-        node: Store<Node>,
+    pub(super) struct Interners {
+        node: Interner<Node>,
     }
 
-    impl<T: Eq + Hash> Default for Store<T> {
+    impl<T: Eq + Hash> Default for Interner<T> {
         fn default() -> Self {
-            Store {
+            Interner {
                 map: Default::default(),
                 vec: Default::default(),
             }
         }
     }
 
-    impl<T: Copy + Eq + Hash> Store<T> {
-        fn alloc(&self, x: T) -> u32 {
+    impl<T: Copy + Eq + Hash> Interner<T> {
+        fn intern(&self, x: T) -> u32 {
             match self.map.borrow_mut().entry(x) {
                 Entry::Occupied(entry) => *entry.get(),
                 Entry::Vacant(entry) => {
@@ -54,30 +52,32 @@ mod store {
         }
     }
 
-    pub trait AllocIn: Sized {
+    pub trait InternInCx: Sized {
         type Interned;
-        fn alloc_in(self, cx: &Cx) -> Self::Interned;
+
+        fn intern_in_cx(self, cx: &Cx) -> Self::Interned;
     }
 
     // FIXME(eddyb) is this sort of thing even needed anymore?
-    impl<T: AllocIn<Interned = INode>, F: FnOnce(&Cx) -> T> AllocIn for F {
+    impl<T: InternInCx<Interned = INode>, F: FnOnce(&Cx) -> T> InternInCx for F {
         type Interned = INode;
-        fn alloc_in(self, cx: &Cx) -> INode {
-            self(cx).alloc_in(cx)
+
+        fn intern_in_cx(self, cx: &Cx) -> INode {
+            self(cx).intern_in_cx(cx)
         }
     }
 
     impl Cx {
-        pub fn a<T: AllocIn>(&self, x: T) -> T::Interned {
-            x.alloc_in(self)
+        pub fn a<T: InternInCx>(&self, x: T) -> T::Interned {
+            x.intern_in_cx(self)
         }
     }
 
-    impl AllocIn for Node {
+    impl InternInCx for Node {
         type Interned = INode;
-        fn alloc_in(self, cx: &Cx) -> INode {
+        fn intern_in_cx(self, cx: &Cx) -> INode {
             match self.normalize(cx) {
-                Ok(x) => INode(cx.stores.node.alloc(x)),
+                Ok(x) => INode(cx.interners.node.intern(x)),
                 Err(x) => x,
             }
         }
@@ -86,7 +86,7 @@ mod store {
     impl Index<INode> for Cx {
         type Output = Node;
         fn index(&self, node: INode) -> &Self::Output {
-            &self.stores.node.vec[node.0 as usize]
+            &self.interners.node.vec[node.0 as usize]
         }
     }
 
@@ -181,9 +181,10 @@ impl fmt::Debug for Const {
     }
 }
 
-impl AllocIn for Const {
+impl InternInCx for Const {
     type Interned = INode;
-    fn alloc_in(self, cx: &Cx) -> INode {
+
+    fn intern_in_cx(self, cx: &Cx) -> INode {
         cx.a(Node::Const(self))
     }
 }
@@ -609,28 +610,28 @@ impl fmt::Debug for Node {
 
 impl Node {
     // FIXME(eddyb) should these take `&Cx` instead?
-    pub fn int_neg(v: INode) -> impl AllocIn<Interned = INode> {
+    pub fn int_neg(v: INode) -> impl InternInCx<Interned = INode> {
         move |cx: &Cx| {
             let size = cx[v].ty().bit_size().unwrap();
             Node::Int(IntOp::Mul, size, v, cx.a(Const::new(size, size.mask())))
         }
     }
 
-    pub fn int_sub(a: INode, b: INode) -> impl AllocIn<Interned = INode> {
+    pub fn int_sub(a: INode, b: INode) -> impl InternInCx<Interned = INode> {
         move |cx: &Cx| {
             let size = cx[a].ty().bit_size().unwrap();
             Node::Int(IntOp::Add, size, a, cx.a(Node::int_neg(b)))
         }
     }
 
-    pub fn bit_not(v: INode) -> impl AllocIn<Interned = INode> {
+    pub fn bit_not(v: INode) -> impl InternInCx<Interned = INode> {
         move |cx: &Cx| {
             let size = cx[v].ty().bit_size().unwrap();
             Node::Int(IntOp::Xor, size, v, cx.a(Const::new(size, size.mask())))
         }
     }
 
-    pub fn bit_rol(v: INode, n: INode) -> impl AllocIn<Interned = INode> {
+    pub fn bit_rol(v: INode, n: INode) -> impl InternInCx<Interned = INode> {
         move |cx: &Cx| {
             let size = cx[v].ty().bit_size().unwrap();
             Node::Int(
@@ -653,7 +654,7 @@ impl Node {
         }
     }
 
-    pub fn bit_ror(v: INode, n: INode) -> impl AllocIn<Interned = INode> {
+    pub fn bit_ror(v: INode, n: INode) -> impl InternInCx<Interned = INode> {
         move |cx: &Cx| {
             let size = cx[v].ty().bit_size().unwrap();
             Node::Int(
@@ -1187,13 +1188,13 @@ pub struct Block {
 }
 
 pub struct Cx {
-    stores: Stores,
+    interners: Interners,
 }
 
 impl Cx {
     pub fn new() -> Self {
         Cx {
-            stores: Stores::default(),
+            interners: Interners::default(),
         }
     }
 }
