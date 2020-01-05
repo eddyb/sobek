@@ -1,6 +1,6 @@
 use crate::ir::{
     BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, IntOp, Isa, MemRef, MemSize, Node, State, Type, Use,
+    Const, Cx, Edge, Edges, Effect, IntOp, Isa, MemRef, MemSize, Node, State, Type,
 };
 use std::iter;
 
@@ -28,7 +28,7 @@ impl Isa for I8051 {
         B16
     }
 
-    fn default_regs(&self, cx: &Cx) -> Vec<Use<Node>> {
+    fn regs(&self) -> Vec<crate::ir::Reg> {
         (0..0x80)
             .map(|i| {
                 crate::ir::Reg {
@@ -58,7 +58,6 @@ impl Isa for I8051 {
                 size: B1,
                 name: "psw.c",
             }))
-            .map(|v| cx.a(Node::InReg(v)))
             .collect()
     }
 

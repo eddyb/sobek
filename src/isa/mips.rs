@@ -2,7 +2,6 @@ use crate::ir::{
     BitSize::{self, *},
     Const, Cx, Edge, Edges, Effect, IntOp, Isa, MemRef, MemSize, Node, State, Type, Use,
 };
-use std::iter;
 
 pub struct Mips32;
 
@@ -85,31 +84,18 @@ impl Isa for Mips32 {
         B32
     }
 
-    fn default_regs(&self, cx: &Cx) -> Vec<Use<Node>> {
+    fn regs(&self) -> Vec<crate::ir::Reg> {
         let lower = (&GPR_NAMES.0, &MUL_DIV_REG_NAMES.0);
         let upper = (&GPR_NAMES.1, &MUL_DIV_REG_NAMES.1);
         [lower, upper]
             .iter()
+            .flat_map(|&(gpr_names, mul_div_reg_names)| gpr_names.iter().chain(mul_div_reg_names))
             .enumerate()
-            .flat_map(|(i, &(gpr_names, mul_div_reg_names))| {
-                let base = i * NUM_REGS;
-                iter::once(Node::Const(Const::new(B32, 0)))
-                    .chain((1..32).map(move |i| {
-                        Node::InReg(crate::ir::Reg {
-                            index: base + i,
-                            size: B32,
-                            name: gpr_names[i],
-                        })
-                    }))
-                    .chain(mul_div_reg_names.iter().enumerate().map(move |(i, name)| {
-                        Node::InReg(crate::ir::Reg {
-                            index: base + Reg::Lo as usize + i,
-                            size: B32,
-                            name,
-                        })
-                    }))
+            .map(move |(index, name)| crate::ir::Reg {
+                index,
+                size: B32,
+                name,
             })
-            .map(|v| cx.a(v))
             .collect()
     }
 

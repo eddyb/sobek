@@ -104,20 +104,22 @@ mod store {
         pub fn new(platform: impl Platform + 'static) -> Self {
             let stores = Stores::default();
 
+            let reg_defs = platform.isa().regs();
+
             let default = State {
                 mem: stores.node.alloc(Node::InMem),
-                regs: vec![],
+                regs: reg_defs
+                    .iter()
+                    .map(|&v| stores.node.alloc(Node::InReg(v)))
+                    .collect(),
+                reg_defs,
             };
 
-            let mut cx = Cx {
+            Cx {
                 stores,
                 platform: Box::new(platform),
                 default,
-            };
-
-            cx.default.regs = cx.platform.isa().default_regs(&cx);
-
-            cx
+            }
         }
     }
 
@@ -1147,15 +1149,18 @@ impl Visit for Effect {
 pub struct State {
     pub mem: Use<Node>,
     pub regs: Vec<Use<Node>>,
+
+    // FIXME(eddyb) intern this information.
+    pub reg_defs: Vec<Reg>,
 }
 
 impl Visit for State {
     fn walk(&self, visitor: &mut impl Visitor) {
-        if self.mem != visitor.cx().default.mem {
+        if visitor.cx()[self.mem] != Node::InMem {
             visitor.visit_node(self.mem);
         }
         for (i, &v) in self.regs.iter().enumerate() {
-            if v != visitor.cx().default.regs[i] {
+            if visitor.cx()[v] != Node::InReg(self.reg_defs[i]) {
                 visitor.visit_node(v);
             }
         }
@@ -1248,7 +1253,7 @@ pub struct Block {
 pub trait Isa {
     fn addr_size(&self) -> BitSize;
 
-    fn default_regs(&self, cx: &Cx) -> Vec<Use<Node>>;
+    fn regs(&self) -> Vec<Reg>;
 
     // FIXME(eddyb) replace the `Result` with a dedicated enum.
     fn lift_instr(&self, cx: &Cx, pc: &mut Const, state: State) -> Result<State, Edges<Edge>>;
@@ -1536,7 +1541,6 @@ impl Cx {
         };
 
         {
-            let default = self.default.mem;
             let m = edge_states_and_values
                 .map(|(state, _), _| state.mem)
                 .merge(|t, e| {
@@ -1545,16 +1549,22 @@ impl Cx {
                     } else {
                         use_counter.visit_node(t);
                         use_counter.visit_node(e);
-                        default
+                        self.a(Node::InMem)
                     }
                 });
-            if m != default {
+            if self[m] != Node::InMem {
                 use_counter.data.state_mem = Some(m);
                 use_counter.visit_node(m);
             }
         }
 
-        for (i, &default) in self.default.regs.iter().enumerate() {
+        let reg_defs = edge_states_and_values
+            .map(|(state, _), _| &state.reg_defs)
+            .merge(|t, e| {
+                assert_eq!(t, e);
+                t
+            });
+        for (i, &r) in reg_defs.iter().enumerate() {
             let v = edge_states_and_values
                 .map(|(state, _), _| state.regs[i])
                 .merge(|t, e| {
@@ -1563,26 +1573,18 @@ impl Cx {
                     } else {
                         use_counter.visit_node(t);
                         use_counter.visit_node(e);
-                        default
+                        self.a(Node::InReg(r))
                     }
                 });
-            if v == default {
-                continue;
+            if self[v] != Node::InReg(r) {
+                use_counter
+                    .data
+                    .val_to_state_regs
+                    .entry(v)
+                    .or_default()
+                    .push(r);
+                use_counter.visit_node(v);
             }
-
-            // HACK(eddyb) try to guess the register name.
-            // Ideally this would be provided by the `Isa`.
-            let r = match self[default] {
-                Node::InReg(r) if i == r.index => r,
-                default => panic!("register #{} has non-register default {:?}", i, default),
-            };
-            use_counter
-                .data
-                .val_to_state_regs
-                .entry(v)
-                .or_default()
-                .push(r);
-            use_counter.visit_node(v);
         }
         edge_states_and_values
             .map(|(_, value), _| value)
@@ -1639,24 +1641,15 @@ impl Cx {
                                  (state, value): (&State, _),
                                  (other_state, _): (&State, _)| {
                                     {
-                                        let default = self.cx.default.mem;
                                         let m = state.mem;
-                                        if m != default && m != other_state.mem {
+                                        if self.cx[m] != Node::InMem && m != other_state.mem {
                                             writeln!(f, "        m = {:?};", m)?;
                                         }
                                     }
-                                    for (i, &default) in self.cx.default.regs.iter().enumerate() {
-                                        let v = state.regs[i];
-                                        if v != default && v != other_state.regs[i] {
-                                            // HACK(eddyb) try to guess the register name.
-                                            // Ideally this would be provided by the `Isa`.
-                                            let r = match self.cx[default] {
-                                                Node::InReg(r) if i == r.index => r,
-                                                default => panic!(
-                                                    "register #{} has non-register default {:?}",
-                                                    i, default
-                                                ),
-                                            };
+                                    for (i, &v) in state.regs.iter().enumerate() {
+                                        let r = state.reg_defs[i];
+                                        if self.cx[v] != Node::InReg(r) && v != other_state.regs[i]
+                                        {
                                             writeln!(f, "        {:?} = {:?};", r, v)?;
                                         }
                                     }

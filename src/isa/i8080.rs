@@ -1,6 +1,6 @@
 use crate::ir::{
     BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, IntOp, Isa, MemRef, MemSize, Node, State, Type, Use,
+    Const, Cx, Edge, Edges, Effect, IntOp, Isa, MemRef, MemSize, Node, State, Type,
 };
 use std::iter;
 
@@ -70,7 +70,7 @@ impl Isa for I8080 {
         B16
     }
 
-    fn default_regs(&self, cx: &Cx) -> Vec<Use<Node>> {
+    fn regs(&self) -> Vec<crate::ir::Reg> {
         iter::once(crate::ir::Reg {
             index: Reg::A as usize,
             size: B8,
@@ -103,7 +103,6 @@ impl Isa for I8080 {
             size: B1,
             name: "ie",
         }))
-        .map(|reg| cx.a(Node::InReg(reg)))
         .collect()
     }
 
