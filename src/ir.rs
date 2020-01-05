@@ -1,6 +1,7 @@
 use scoped_tls::scoped_thread_local;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::iter;
 use std::marker::PhantomData;
 use std::mem;
 use std::ops::Deref;
@@ -102,23 +103,9 @@ mod store {
 
     impl Cx {
         pub fn new(platform: impl Platform + 'static) -> Self {
-            let stores = Stores::default();
-
-            let reg_defs = platform.isa().regs();
-
-            let default = State {
-                mem: stores.node.alloc(Node::InMem),
-                regs: reg_defs
-                    .iter()
-                    .map(|&v| stores.node.alloc(Node::InReg(v)))
-                    .collect(),
-                reg_defs,
-            };
-
             Cx {
-                stores,
+                stores: Stores::default(),
                 platform: Box::new(platform),
-                default,
             }
         }
     }
@@ -1057,6 +1044,14 @@ impl<T: Visit> Visit for &'_ T {
     }
 }
 
+impl<T: Visit> Visit for Option<T> {
+    fn walk(&self, visitor: &mut impl Visitor) {
+        if let Some(x) = self {
+            x.visit(visitor);
+        }
+    }
+}
+
 impl Visit for Use<Node> {
     fn walk(&self, visitor: &mut impl Visitor) {
         let node = visitor.cx()[*self];
@@ -1353,7 +1348,6 @@ pub struct Cx {
     stores: Stores,
 
     pub platform: Box<dyn Platform>,
-    pub default: State,
 }
 
 impl Cx {
@@ -1367,11 +1361,19 @@ impl Cx {
         &'a self,
         edge_values: Edges<&'a (impl Visit + fmt::Debug)>,
     ) -> impl fmt::Display + 'a {
-        self.pretty_print_with_states_on_edges(edge_values.map(|value, _| (&self.default, value)))
+        self.pretty_print_maybe_with_states_on_edges(edge_values.map(|value, _| (None, value)))
     }
     pub fn pretty_print_with_states_on_edges<'a>(
         &'a self,
         edge_states_and_values: Edges<(&'a State, &'a (impl Visit + fmt::Debug))>,
+    ) -> impl fmt::Display + 'a {
+        self.pretty_print_maybe_with_states_on_edges(
+            edge_states_and_values.map(|(state, value), _| (Some(state), value)),
+        )
+    }
+    fn pretty_print_maybe_with_states_on_edges<'a>(
+        &'a self,
+        edge_states_and_values: Edges<(Option<&'a State>, &'a (impl Visit + fmt::Debug))>,
     ) -> impl fmt::Display + 'a {
         struct Data {
             use_counts: HashMap<Use<Node>, usize>,
@@ -1540,52 +1542,66 @@ impl Cx {
             data: &mut data,
         };
 
-        {
-            let m = edge_states_and_values
-                .map(|(state, _), _| state.mem)
-                .merge(|t, e| {
-                    if t == e {
-                        t
-                    } else {
-                        use_counter.visit_node(t);
-                        use_counter.visit_node(e);
-                        self.a(Node::InMem)
-                    }
-                });
-            if self[m] != Node::InMem {
-                use_counter.data.state_mem = Some(m);
-                use_counter.visit_node(m);
-            }
-        }
-
-        let reg_defs = edge_states_and_values
-            .map(|(state, _), _| &state.reg_defs)
+        let has_states = edge_states_and_values
+            .map(|(state, _), _| state.is_some())
             .merge(|t, e| {
                 assert_eq!(t, e);
                 t
             });
-        for (i, &r) in reg_defs.iter().enumerate() {
-            let v = edge_states_and_values
-                .map(|(state, _), _| state.regs[i])
-                .merge(|t, e| {
-                    if t == e {
-                        t
-                    } else {
-                        use_counter.visit_node(t);
-                        use_counter.visit_node(e);
-                        self.a(Node::InReg(r))
+        if has_states {
+            let edge_states = edge_states_and_values.map(|(state, _), _| state.unwrap());
+
+            let reg_defs = edge_states.map(|state, _| &state.reg_defs).merge(|t, e| {
+                assert_eq!(t, e);
+                t
+            });
+
+            let mem_and_regs = iter::once(None).chain((0..reg_defs.len()).map(Some));
+            for maybe_reg in mem_and_regs {
+                let default = match maybe_reg {
+                    None => Node::InMem,
+                    Some(i) => Node::InReg(reg_defs[i]),
+                };
+                let node = edge_states
+                    .map(|state, _| match maybe_reg {
+                        None => state.mem,
+                        Some(i) => state.regs[i],
+                    })
+                    .map(|node, _| {
+                        if self[node] != default {
+                            Some(node)
+                        } else {
+                            None
+                        }
+                    })
+                    .merge(|t, e| {
+                        if t == e {
+                            t
+                        } else {
+                            (t, e).visit(&mut use_counter);
+                            None
+                        }
+                    });
+                node.visit(&mut use_counter);
+
+                if let Some(node) = node {
+                    match maybe_reg {
+                        None => {
+                            use_counter.data.state_mem = Some(node);
+                        }
+                        Some(i) => {
+                            use_counter
+                                .data
+                                .val_to_state_regs
+                                .entry(node)
+                                .or_default()
+                                .push(reg_defs[i]);
+                        }
                     }
-                });
-            if self[v] != Node::InReg(r) {
-                use_counter
-                    .data
-                    .val_to_state_regs
-                    .entry(v)
-                    .or_default()
-                    .push(r);
-                use_counter.visit_node(v);
+                }
             }
         }
+
         edge_states_and_values
             .map(|(_, value), _| value)
             .visit(&mut use_counter);
@@ -1600,7 +1616,7 @@ impl Cx {
             cx: &'a Cx,
             data: Data,
 
-            edge_states_and_values: Edges<(&'a State, &'a T)>,
+            edge_states_and_values: Edges<(Option<&'a State>, &'a T)>,
         }
 
         impl<T> fmt::Display for PrintFromDisplay<'_, T>
@@ -1638,19 +1654,20 @@ impl Cx {
 
                             let print_edge =
                                 |f: &mut fmt::Formatter,
-                                 (state, value): (&State, _),
-                                 (other_state, _): (&State, _)| {
-                                    {
+                                 (state, value): (Option<&State>, _),
+                                 (other_state, _): (Option<&State>, _)| {
+                                    assert_eq!(state.is_some(), other_state.is_some());
+                                    if let (Some(state), Some(other_state)) = (state, other_state) {
                                         let m = state.mem;
                                         if self.cx[m] != Node::InMem && m != other_state.mem {
                                             writeln!(f, "        m = {:?};", m)?;
                                         }
-                                    }
-                                    for (i, &v) in state.regs.iter().enumerate() {
-                                        let r = state.reg_defs[i];
-                                        if self.cx[v] != Node::InReg(r) && v != other_state.regs[i]
-                                        {
-                                            writeln!(f, "        {:?} = {:?};", r, v)?;
+                                        for (i, &v) in state.regs.iter().enumerate() {
+                                            let r = state.reg_defs[i];
+                                            if self.cx[v] != Node::InReg(r) && v != other_state.regs[i]
+                                            {
+                                                writeln!(f, "        {:?} = {:?};", r, v)?;
+                                            }
                                         }
                                     }
                                     writeln!(f, "        {:?}", value)

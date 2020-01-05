@@ -231,7 +231,15 @@ impl<'a> Explorer<'a> {
         // FIXME(eddyb) clean this up whenever NLL/Polonius can do the
         // efficient check (`if let Some(x) = map.get(k) { return x; }`).
         while !self.blocks.contains_key(&bb) {
-            let mut state = self.cx.default.clone();
+            let reg_defs = self.cx.platform.isa().regs();
+            let mut state = State {
+                mem: self.cx.a(Node::InMem),
+                regs: reg_defs
+                    .iter()
+                    .map(|&v| self.cx.a(Node::InReg(v)))
+                    .collect(),
+                reg_defs,
+            };
             let mut pc = Const::new(self.cx.platform.isa().addr_size(), bb.entry_pc);
             let edges = loop {
                 match self.cx.platform.isa().lift_instr(self.cx, &mut pc, state) {
