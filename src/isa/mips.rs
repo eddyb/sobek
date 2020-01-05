@@ -1,6 +1,6 @@
 use crate::ir::{
     BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, IntOp, Isa, Mem, MemRef, MemSize, State, Use, Val,
+    Const, Cx, Edge, Edges, Effect, IntOp, Isa, MemRef, MemSize, Node, State, Type, Use,
 };
 use std::iter;
 
@@ -64,7 +64,7 @@ enum Reg {
 const NUM_REGS: usize = 32 + 2;
 
 impl State {
-    fn set(&mut self, r: usize, v: Use<Val>) {
+    fn set(&mut self, r: usize, v: Use<Node>) {
         if r != 0 && r != NUM_REGS {
             self.regs[r] = v;
         }
@@ -76,7 +76,7 @@ impl Isa for Mips32 {
         B32
     }
 
-    fn default_regs(&self, cx: &Cx) -> Vec<Use<Val>> {
+    fn default_regs(&self, cx: &Cx) -> Vec<Use<Node>> {
         let lower = (&GPR_NAMES.0, &MUL_DIV_REG_NAMES.0);
         let upper = (&GPR_NAMES.1, &MUL_DIV_REG_NAMES.1);
         [lower, upper]
@@ -84,16 +84,16 @@ impl Isa for Mips32 {
             .enumerate()
             .flat_map(|(i, &(gpr_names, mul_div_reg_names))| {
                 let base = i * NUM_REGS;
-                iter::once(Val::Const(Const::new(B32, 0)))
+                iter::once(Node::Const(Const::new(B32, 0)))
                     .chain((1..32).map(move |i| {
-                        Val::InReg(crate::ir::Reg {
+                        Node::InReg(crate::ir::Reg {
                             index: base + i,
                             size: B32,
                             name: gpr_names[i],
                         })
                     }))
                     .chain(mul_div_reg_names.iter().enumerate().map(move |(i, name)| {
-                        Val::InReg(crate::ir::Reg {
+                        Node::InReg(crate::ir::Reg {
                             index: base + Reg::Lo as usize + i,
                             size: B32,
                             name,
@@ -133,14 +133,9 @@ impl Isa for Mips32 {
         // FIXME(eddyb) ensure more aggressively that this is always 0.
         let zero = state.regs[0];
 
-        macro_rules! val {
+        macro_rules! node {
             ($name:ident($($arg:expr),*)) => {
-                cx.a(Val::$name($($arg),*))
-            }
-        }
-        macro_rules! mem {
-            ($name:ident($($arg:expr),*)) => {
-                cx.a(Mem::$name($($arg),*))
+                cx.a(Node::$name($($arg),*))
             }
         }
 
@@ -201,7 +196,7 @@ impl Isa for Mips32 {
                     (e, t)
                 };
 
-                assert_eq!(cx[cond].size(), B1);
+                assert_eq!(cx[cond].ty(), Type::Bits(B1));
 
                 // Process delay slot.
                 match self.lift_instr(cx, pc, state) {
@@ -255,16 +250,16 @@ impl Isa for Mips32 {
             ($i:expr) => {{
                 let i = $i as usize;
                 match size {
-                    B64 => val!(Int(
+                    B64 => node!(Int(
                         IntOp::Or,
                         B64,
-                        val!(Int(
+                        node!(Int(
                             IntOp::Shl,
                             B64,
-                            val!(Zext(B64, state.regs[NUM_REGS + i])),
+                            node!(Zext(B64, state.regs[NUM_REGS + i])),
                             cx.a(Const::new(B8, 32))
                         )),
-                        val!(Zext(B64, state.regs[i]))
+                        node!(Zext(B64, state.regs[i]))
                     )),
                     B32 => state.regs[i],
                     _ => unreachable!(),
@@ -277,12 +272,12 @@ impl Isa for Mips32 {
                 let val = $val;
                 match size {
                     B64 => {
-                        state.set(i, val!(Trunc(B32, val)));
+                        state.set(i, node!(Trunc(B32, val)));
                         state.set(
                             NUM_REGS + i,
-                            val!(Trunc(
+                            node!(Trunc(
                                 B32,
-                                val!(Int(IntOp::ShrU, B64, val, cx.a(Const::new(B8, 32))))
+                                node!(Int(IntOp::ShrU, B64, val, cx.a(Const::new(B8, 32))))
                             )),
                         );
                     }
@@ -327,9 +322,9 @@ impl Isa for Mips32 {
             let rt = get_reg_maybe64!(rt);
             let sa = field(6, 5);
             let v = match funct {
-                0 => val!(Int(IntOp::Shl, B32, rt, cx.a(Const::new(B32, sa as u64)))),
-                2 => val!(Int(IntOp::ShrU, B32, rt, cx.a(Const::new(B32, sa as u64)))),
-                3 => val!(Int(IntOp::ShrS, B32, rt, cx.a(Const::new(B32, sa as u64)))),
+                0 => node!(Int(IntOp::Shl, B32, rt, cx.a(Const::new(B32, sa as u64)))),
+                2 => node!(Int(IntOp::ShrU, B32, rt, cx.a(Const::new(B32, sa as u64)))),
+                3 => node!(Int(IntOp::ShrS, B32, rt, cx.a(Const::new(B32, sa as u64)))),
 
                 8 => return jump!(rs),
                 9 => {
@@ -349,14 +344,14 @@ impl Isa for Mips32 {
                 }
 
                 26 | 30 => {
-                    set_reg_maybe64!(Reg::Lo as usize, val!(Int(IntOp::DivS, size, rs, rt)));
-                    set_reg_maybe64!(Reg::Hi as usize, val!(Int(IntOp::RemS, size, rs, rt)));
+                    set_reg_maybe64!(Reg::Lo as usize, node!(Int(IntOp::DivS, size, rs, rt)));
+                    set_reg_maybe64!(Reg::Hi as usize, node!(Int(IntOp::RemS, size, rs, rt)));
                     return Ok(state);
                 }
 
                 27 | 31 => {
-                    set_reg_maybe64!(Reg::Lo as usize, val!(Int(IntOp::DivU, size, rs, rt)));
-                    set_reg_maybe64!(Reg::Hi as usize, val!(Int(IntOp::RemU, size, rs, rt)));
+                    set_reg_maybe64!(Reg::Lo as usize, node!(Int(IntOp::DivU, size, rs, rt)));
+                    set_reg_maybe64!(Reg::Hi as usize, node!(Int(IntOp::RemU, size, rs, rt)));
                     return Ok(state);
                 }
 
@@ -364,28 +359,28 @@ impl Isa for Mips32 {
                     // FIXME(eddyb) perform actual 128-bit multiplies, using
                     // `Sext(B128, ...)` for `funct=28`, and `Zext(B128, ...)`
                     // for `funct=29`, or emulate it using 64-bit operations only.
-                    let result = val!(Int(IntOp::Mul, size, rs, rt));
+                    let result = node!(Int(IntOp::Mul, size, rs, rt));
                     set_reg_maybe64!(Reg::Lo as usize, result);
                     set_reg_maybe64!(Reg::Hi as usize, cx.a(Const::new(size, 0)));
                     return Ok(state);
                 }
 
-                32 | 33 => val!(Int(IntOp::Add, B32, rs, rt)),
-                34 | 35 => val!(int_sub(rs, rt)),
-                36 => val!(Int(IntOp::And, B32, rs, rt)),
-                37 => val!(Int(IntOp::Or, B32, rs, rt)),
-                38 => val!(Int(IntOp::Xor, B32, rs, rt)),
-                39 => val!(bit_not(val!(Int(IntOp::Or, B32, rs, rt)))),
-                42 => val!(Zext(B32, val!(Int(IntOp::LtS, B32, rs, rt)))),
-                43 => val!(Zext(B32, val!(Int(IntOp::LtU, B32, rs, rt)))),
+                32 | 33 => node!(Int(IntOp::Add, B32, rs, rt)),
+                34 | 35 => node!(int_sub(rs, rt)),
+                36 => node!(Int(IntOp::And, B32, rs, rt)),
+                37 => node!(Int(IntOp::Or, B32, rs, rt)),
+                38 => node!(Int(IntOp::Xor, B32, rs, rt)),
+                39 => node!(bit_not(node!(Int(IntOp::Or, B32, rs, rt)))),
+                42 => node!(Zext(B32, node!(Int(IntOp::LtS, B32, rs, rt)))),
+                43 => node!(Zext(B32, node!(Int(IntOp::LtU, B32, rs, rt)))),
 
-                60 => val!(Int(
+                60 => node!(Int(
                     IntOp::Shl,
                     size,
                     rt,
                     cx.a(Const::new(B8, sa as u64 + 32))
                 )),
-                63 => val!(Int(
+                63 => node!(Int(
                     IntOp::ShrU,
                     size,
                     rt,
@@ -399,8 +394,8 @@ impl Isa for Mips32 {
             // REGIMM (I format w/o rt).
             let rs = state.regs[rs];
             match rt {
-                0 => return branch!(val!(Int(IntOp::LtS, B32, rs, zero)) => true),
-                1 => return branch!(val!(Int(IntOp::LtS, B32, rs, zero)) => false),
+                0 => return branch!(node!(Int(IntOp::LtS, B32, rs, zero)) => true),
+                1 => return branch!(node!(Int(IntOp::LtS, B32, rs, zero)) => false),
                 _ => error!("unknown REGIMM rt={}", rt),
             }
         } else if op == 2 || op == 3 {
@@ -463,7 +458,7 @@ impl Isa for Mips32 {
                 ($sz:ident) => {
                     MemRef {
                         mem: state.mem,
-                        addr: val!(Int(IntOp::Add, B32, rs, cx.a(imm))),
+                        addr: node!(Int(IntOp::Add, B32, rs, cx.a(imm))),
                         size: MemSize::$sz,
                     }
                 };
@@ -472,10 +467,10 @@ impl Isa for Mips32 {
             match op {
                 // FIXME(eddyb) for 20..=23, only execute the delay slot when
                 // the branch is taken (the specs talk about "nullification").
-                4 | 20 => return branch!(val!(Int(IntOp::Eq, B32, rs, rt)) => true),
-                5 | 21 => return branch!(val!(Int(IntOp::Eq, B32, rs, rt)) => false),
-                6 | 22 => return branch!(val!(Int(IntOp::LtS, B32, zero, rs)) => false),
-                7 | 23 => return branch!(val!(Int(IntOp::LtS, B32, zero, rs)) => true),
+                4 | 20 => return branch!(node!(Int(IntOp::Eq, B32, rs, rt)) => true),
+                5 | 21 => return branch!(node!(Int(IntOp::Eq, B32, rs, rt)) => false),
+                6 | 22 => return branch!(node!(Int(IntOp::LtS, B32, zero, rs)) => false),
+                7 | 23 => return branch!(node!(Int(IntOp::LtS, B32, zero, rs)) => true),
 
                 8..=14 => {
                     let op = match op {
@@ -494,23 +489,23 @@ impl Isa for Mips32 {
                         _ => imm,
                     };
 
-                    let mut v = val!(Int(op, B32, rs, cx.a(imm)));
-                    if cx[v].size() == B1 {
-                        v = val!(Zext(B32, v));
+                    let mut v = node!(Int(op, B32, rs, cx.a(imm)));
+                    if cx[v].ty() == Type::Bits(B1) {
+                        v = node!(Zext(B32, v));
                     }
                     state.set(rd, v);
                 }
                 15 => state.set(rd, cx.a(Const::new(B32, (imm.as_u32() << 16) as u64))),
 
-                32 => state.set(rd, val!(Sext(B32, val!(Load(mem_ref!(M8)))))),
-                33 => state.set(rd, val!(Sext(B32, val!(Load(mem_ref!(M16)))))),
-                35 => state.set(rd, val!(Load(mem_ref!(M32)))),
-                36 => state.set(rd, val!(Zext(B32, val!(Load(mem_ref!(M8)))))),
-                37 => state.set(rd, val!(Zext(B32, val!(Load(mem_ref!(M16)))))),
+                32 => state.set(rd, node!(Sext(B32, node!(Load(mem_ref!(M8)))))),
+                33 => state.set(rd, node!(Sext(B32, node!(Load(mem_ref!(M16)))))),
+                35 => state.set(rd, node!(Load(mem_ref!(M32)))),
+                36 => state.set(rd, node!(Zext(B32, node!(Load(mem_ref!(M8)))))),
+                37 => state.set(rd, node!(Zext(B32, node!(Load(mem_ref!(M16)))))),
 
-                40 => state.mem = mem!(Store(mem_ref!(M8), val!(Trunc(B8, rt)))),
-                41 => state.mem = mem!(Store(mem_ref!(M16), val!(Trunc(B16, rt)))),
-                43 => state.mem = mem!(Store(mem_ref!(M32), rt)),
+                40 => state.mem = node!(Store(mem_ref!(M8), node!(Trunc(B8, rt)))),
+                41 => state.mem = node!(Store(mem_ref!(M16), node!(Trunc(B16, rt)))),
+                43 => state.mem = node!(Store(mem_ref!(M32), rt)),
 
                 47 => {
                     // FIXME(eddyb) use the result of rs+imm as an argument.
@@ -547,8 +542,8 @@ impl Isa for Mips32 {
                     }));
                 }
 
-                55 => set_reg_maybe64!(rd, val!(Load(mem_ref!(M64)))),
-                63 => state.mem = mem!(Store(mem_ref!(M64), rt)),
+                55 => set_reg_maybe64!(rd, node!(Load(mem_ref!(M64)))),
+                63 => state.mem = node!(Store(mem_ref!(M64), rt)),
 
                 _ => error!("unknown opcode 0x{:x} ({0})", op),
             }

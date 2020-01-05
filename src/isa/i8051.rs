@@ -1,6 +1,6 @@
 use crate::ir::{
     BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, IntOp, Isa, Mem, MemRef, MemSize, State, Use, Val,
+    Const, Cx, Edge, Edges, Effect, IntOp, Isa, MemRef, MemSize, Node, State, Type, Use,
 };
 use std::iter;
 
@@ -28,7 +28,7 @@ impl Isa for I8051 {
         B16
     }
 
-    fn default_regs(&self, cx: &Cx) -> Vec<Use<Val>> {
+    fn default_regs(&self, cx: &Cx) -> Vec<Use<Node>> {
         (0..0x80)
             .map(|i| {
                 crate::ir::Reg {
@@ -58,7 +58,7 @@ impl Isa for I8051 {
                 size: B1,
                 name: "psw.c",
             }))
-            .map(|v| cx.a(Val::InReg(v)))
+            .map(|v| cx.a(Node::InReg(v)))
             .collect()
     }
 
@@ -90,20 +90,15 @@ impl Isa for I8051 {
 
         let op = imm!(8).as_u8();
 
-        macro_rules! val {
+        macro_rules! node {
             ($name:ident($($arg:expr),*)) => {
-                cx.a(Val::$name($($arg),*))
-            }
-        }
-        macro_rules! mem {
-            ($name:ident($($arg:expr),*)) => {
-                cx.a(Mem::$name($($arg),*))
+                cx.a(Node::$name($($arg),*))
             }
         }
         macro_rules! mem_ref {
             ($addr:expr, $sz:ident) => {{
                 let addr = $addr;
-                assert_eq!(cx[addr].size(), B8);
+                assert_eq!(cx[addr].ty(), Type::Bits(B8));
                 MemRef {
                     mem: state.mem,
                     addr,
@@ -118,15 +113,15 @@ impl Isa for I8051 {
         macro_rules! push {
             ($value:expr) => {{
                 let value = $value;
-                let size = cx[value].size();
-                let sp = val!(Int(
+                let size = cx[value].ty().bit_size().unwrap();
+                let sp = node!(Int(
                     IntOp::Add,
                     B8,
                     state.regs[Reg::SP as usize],
                     cx.a(Const::new(B8, (size.bits() / 8) as u64))
                 ));
                 state.regs[Reg::SP as usize] = sp;
-                state.mem = mem!(Store(
+                state.mem = node!(Store(
                     match size {
                         B8 => mem_ref!(sp),
                         B16 => mem_ref!(sp, M16),
@@ -140,8 +135,8 @@ impl Isa for I8051 {
         macro_rules! pop {
             ($sz:ident) => {{
                 let sp = state.regs[Reg::SP as usize];
-                let value = val!(Load(mem_ref!(sp, $sz)));
-                state.regs[Reg::SP as usize] = val!(int_sub(
+                let value = node!(Load(mem_ref!(sp, $sz)));
+                state.regs[Reg::SP as usize] = node!(int_sub(
                     sp,
                     cx.a(Const::new(B8, (MemSize::$sz.bits() / 8) as u64))
                 ));
@@ -180,7 +175,7 @@ impl Isa for I8051 {
                     (e, t)
                 };
 
-                assert_eq!(cx[cond].size(), B1);
+                assert_eq!(cx[cond].ty(), Type::Bits(B1));
 
                 Err(Edges::Branch {
                     cond,
@@ -224,7 +219,7 @@ impl Isa for I8051 {
                         assert!(i != Reg::PSW as usize);
                         state.regs[i]
                     }
-                    Operand::Mem(m) => val!(Load(m)),
+                    Operand::Mem(m) => node!(Load(m)),
                 }
             };
             () => {
@@ -241,7 +236,7 @@ impl Isa for I8051 {
                         assert!(i != Reg::PSW as usize);
                         state.regs[i] = val;
                     }
-                    Operand::Mem(m) => state.mem = mem!(Store(m, val)),
+                    Operand::Mem(m) => state.mem = node!(Store(m, val)),
                 }
             }};
             ($val:expr) => {
@@ -270,7 +265,7 @@ impl Isa for I8051 {
                 direct!()
             } else {
                 Operand::Mem(mem_ref!(if (op & 0xf) < 8 {
-                    val!(Load(mem_ref!(cx.a(Const::new(B8, (op & 1) as u64)))))
+                    node!(Load(mem_ref!(cx.a(Const::new(B8, (op & 1) as u64)))))
                 } else {
                     cx.a(Const::new(B8, (op & 7) as u64))
                 }))
@@ -278,66 +273,76 @@ impl Isa for I8051 {
 
             match op >> 4 {
                 0 => {
-                    set!(val!(Int(IntOp::Add, B8, get!(), cx.a(Const::new(B8, 1)))));
+                    set!(node!(Int(IntOp::Add, B8, get!(), cx.a(Const::new(B8, 1)))));
                 }
                 1 => {
-                    set!(val!(int_sub(get!(), cx.a(Const::new(B8, 1)))));
+                    set!(node!(int_sub(get!(), cx.a(Const::new(B8, 1)))));
                 }
                 2 => {
                     let (a, b) = (state.regs[Reg::A as usize], get!());
                     // HACK(eddyb) this computes the result & carry by
                     // doing the operation with 16 bits instead of 8.
-                    let wide = val!(Int(IntOp::Add, B16, val!(Zext(B16, a)), val!(Zext(B16, b))));
-                    state.regs[Reg::A as usize] = val!(Trunc(B8, wide));
-                    state.regs[Reg::PSW_C as usize] = val!(Trunc(
+                    let wide = node!(Int(
+                        IntOp::Add,
+                        B16,
+                        node!(Zext(B16, a)),
+                        node!(Zext(B16, b))
+                    ));
+                    state.regs[Reg::A as usize] = node!(Trunc(B8, wide));
+                    state.regs[Reg::PSW_C as usize] = node!(Trunc(
                         B1,
-                        val!(Int(IntOp::ShrU, B16, wide, cx.a(Const::new(B8, 8))))
+                        node!(Int(IntOp::ShrU, B16, wide, cx.a(Const::new(B8, 8))))
                     ));
                 }
                 3 => {
                     let (a, b) = (state.regs[Reg::A as usize], get!());
                     // HACK(eddyb) this computes the result & carry by
                     // doing the operation with 16 bits instead of 8.
-                    let wide = val!(Int(
+                    let wide = node!(Int(
                         IntOp::Add,
                         B16,
-                        val!(Int(IntOp::Add, B16, val!(Zext(B16, a)), val!(Zext(B16, b)))),
-                        val!(Zext(B16, state.regs[Reg::PSW_C as usize]))
+                        node!(Int(
+                            IntOp::Add,
+                            B16,
+                            node!(Zext(B16, a)),
+                            node!(Zext(B16, b))
+                        )),
+                        node!(Zext(B16, state.regs[Reg::PSW_C as usize]))
                     ));
-                    state.regs[Reg::A as usize] = val!(Trunc(B8, wide));
-                    state.regs[Reg::PSW_C as usize] = val!(Trunc(
+                    state.regs[Reg::A as usize] = node!(Trunc(B8, wide));
+                    state.regs[Reg::PSW_C as usize] = node!(Trunc(
                         B1,
-                        val!(Int(IntOp::ShrU, B16, wide, cx.a(Const::new(B8, 8))))
+                        node!(Int(IntOp::ShrU, B16, wide, cx.a(Const::new(B8, 8))))
                     ));
                 }
                 4 => {
                     state.regs[Reg::A as usize] =
-                        val!(Int(IntOp::Or, B8, state.regs[Reg::A as usize], get!()));
+                        node!(Int(IntOp::Or, B8, state.regs[Reg::A as usize], get!()));
                 }
                 5 => {
                     state.regs[Reg::A as usize] =
-                        val!(Int(IntOp::And, B8, state.regs[Reg::A as usize], get!()));
+                        node!(Int(IntOp::And, B8, state.regs[Reg::A as usize], get!()));
                 }
                 6 => {
                     state.regs[Reg::A as usize] =
-                        val!(Int(IntOp::Xor, B8, state.regs[Reg::A as usize], get!()));
+                        node!(Int(IntOp::Xor, B8, state.regs[Reg::A as usize], get!()));
                 }
                 7 => set!(cx.a(imm!(8))),
                 8 if op == 0x84 => {
                     let a = state.regs[Reg::A as usize];
                     let b = state.regs[Reg::B as usize];
                     let (a, b) = (
-                        val!(Int(IntOp::DivU, B8, a, b)),
-                        val!(Int(IntOp::RemU, B8, a, b)),
+                        node!(Int(IntOp::DivU, B8, a, b)),
+                        node!(Int(IntOp::RemU, B8, a, b)),
                     );
                     state.regs[Reg::A as usize] = a;
                     state.regs[Reg::B as usize] = b;
                 }
                 8 => set!(direct!(), get!()),
                 9 => {
-                    state.regs[Reg::A as usize] = val!(int_sub(
-                        val!(int_sub(state.regs[Reg::A as usize], get!())),
-                        val!(Zext(B8, state.regs[Reg::PSW_C as usize]))
+                    state.regs[Reg::A as usize] = node!(int_sub(
+                        node!(int_sub(state.regs[Reg::A as usize], get!())),
+                        node!(Zext(B8, state.regs[Reg::PSW_C as usize]))
                     ));
                     // FIXME(eddyb) set the carry bit.
                 }
@@ -345,13 +350,18 @@ impl Isa for I8051 {
                     let a = state.regs[Reg::A as usize];
                     let b = state.regs[Reg::B as usize];
                     let (a, b) = (
-                        val!(Int(IntOp::Mul, B8, a, b)),
-                        val!(Trunc(
+                        node!(Int(IntOp::Mul, B8, a, b)),
+                        node!(Trunc(
                             B8,
-                            val!(Int(
+                            node!(Int(
                                 IntOp::ShrU,
                                 B16,
-                                val!(Int(IntOp::Mul, B16, val!(Zext(B16, a)), val!(Zext(B16, b)))),
+                                node!(Int(
+                                    IntOp::Mul,
+                                    B16,
+                                    node!(Zext(B16, a)),
+                                    node!(Zext(B16, b))
+                                )),
                                 cx.a(Const::new(B8, 8))
                             ))
                         )),
@@ -361,10 +371,10 @@ impl Isa for I8051 {
                 }
                 0xa => set!(get!(direct!())),
                 0xb if op == 0xb4 || op == 0xb5 => {
-                    return branch!(val!(Int(IntOp::Eq, B8, get!(), state.regs[Reg::A as usize])) => false);
+                    return branch!(node!(Int(IntOp::Eq, B8, get!(), state.regs[Reg::A as usize])) => false);
                 }
-                0xb => return branch!(val!(Int(IntOp::Eq, B8, get!(), cx.a(imm!(8)))) => false),
-                0xc if op == 0xc4 => set!(val!(bit_rol(get!(), cx.a(Const::new(B8, 4))))),
+                0xb => return branch!(node!(Int(IntOp::Eq, B8, get!(), cx.a(imm!(8)))) => false),
+                0xc if op == 0xc4 => set!(node!(bit_rol(get!(), cx.a(Const::new(B8, 4))))),
                 0xc => {
                     let a = state.regs[Reg::A as usize];
                     state.regs[Reg::A as usize] = get!();
@@ -378,24 +388,24 @@ impl Isa for I8051 {
                         ($v:expr) => {{
                             let v = $v;
                             (
-                                val!(Int(IntOp::And, B8, v, cx.a(Const::new(B8, 0xf0)))),
-                                val!(Int(IntOp::And, B8, v, cx.a(Const::new(B8, 0x0f)))),
+                                node!(Int(IntOp::And, B8, v, cx.a(Const::new(B8, 0xf0)))),
+                                node!(Int(IntOp::And, B8, v, cx.a(Const::new(B8, 0x0f)))),
                             )
                         }};
                     }
                     let (a_hi, a_lo) = nibbles!(state.regs[Reg::A as usize]);
                     let (v_hi, v_lo) = nibbles!(get!());
-                    state.regs[Reg::A as usize] = val!(Int(IntOp::Or, B8, a_hi, v_lo));
-                    set!(val!(Int(IntOp::Or, B8, v_hi, a_lo)));
+                    state.regs[Reg::A as usize] = node!(Int(IntOp::Or, B8, a_hi, v_lo));
+                    set!(node!(Int(IntOp::Or, B8, v_hi, a_lo)));
                 }
                 0xd => {
-                    let val = val!(int_sub(get!(), cx.a(Const::new(B8, 1))));
+                    let val = node!(int_sub(get!(), cx.a(Const::new(B8, 1))));
                     set!(val);
-                    return branch!(val!(Int(IntOp::Eq, B8, val, cx.a(Const::new(B8, 0)))) => false);
+                    return branch!(node!(Int(IntOp::Eq, B8, val, cx.a(Const::new(B8, 0)))) => false);
                 }
                 0xe if op == 0xe4 => set!(cx.a(Const::new(B8, 0))),
                 0xe => state.regs[Reg::A as usize] = get!(),
-                0xf if op == 0xf4 => set!(val!(bit_not(get!()))),
+                0xf if op == 0xf4 => set!(node!(bit_not(get!()))),
                 0xf => set!(state.regs[Reg::A as usize]),
                 _ => unreachable!(),
             }
@@ -418,7 +428,7 @@ impl Isa for I8051 {
                 0x00 => {}
                 0x02 => return jump!(cx.a(imm!(16))),
                 0x03 => {
-                    state.regs[Reg::A as usize] = val!(bit_ror(
+                    state.regs[Reg::A as usize] = node!(bit_ror(
                         state.regs[Reg::A as usize],
                         cx.a(Const::new(B8, 1))
                     ))
@@ -427,16 +437,16 @@ impl Isa for I8051 {
                     let bit = bit_addr!();
                     let val = get!();
                     let bit_was_set =
-                        val!(Int(IntOp::And, B8, val, cx.a(Const::new(B8, 1 << bit))));
+                        node!(Int(IntOp::And, B8, val, cx.a(Const::new(B8, 1 << bit))));
                     if op == 0x10 {
-                        set!(val!(Int(
+                        set!(node!(Int(
                             IntOp::And,
                             B8,
                             val,
                             cx.a(Const::new(B8, (!(1u8 << bit)) as u64))
                         )));
                     }
-                    return branch!(val!(Int(IntOp::Eq, B8, bit_was_set, cx.a(Const::new(B8, 0)))) => op == 0x30);
+                    return branch!(node!(Int(IntOp::Eq, B8, bit_was_set, cx.a(Const::new(B8, 0)))) => op == 0x30);
                 }
                 0x12 => return call!(cx.a(imm!(16))),
                 0x22 | 0x32 => {
@@ -446,20 +456,20 @@ impl Isa for I8051 {
                     return jump!(pop!(M16));
                 }
                 0x23 => {
-                    state.regs[Reg::A as usize] = val!(bit_rol(
+                    state.regs[Reg::A as usize] = node!(bit_rol(
                         state.regs[Reg::A as usize],
                         cx.a(Const::new(B8, 1))
                     ))
                 }
                 0x40 | 0x50 => {
-                    return branch!(val!(Int(IntOp::Eq, B1, state.regs[Reg::PSW_C as usize], cx.a(Const::new(B1, 0)))) => op == 0x50);
+                    return branch!(node!(Int(IntOp::Eq, B1, state.regs[Reg::PSW_C as usize], cx.a(Const::new(B1, 0)))) => op == 0x50);
                 }
                 0x60 | 0x70 => {
-                    return branch!(val!(Int(IntOp::Eq, B8, state.regs[Reg::A as usize], cx.a(Const::new(B8, 0)))) => op == 0x60);
+                    return branch!(node!(Int(IntOp::Eq, B8, state.regs[Reg::A as usize], cx.a(Const::new(B8, 0)))) => op == 0x60);
                 }
                 0x42 | 0x43 | 0x52 | 0x53 | 0x62 | 0x63 => {
                     operand = direct!();
-                    set!(val!(Int(
+                    set!(node!(Int(
                         match op >> 4 {
                             4 => IntOp::Or,
                             5 => IntOp::And,
@@ -477,9 +487,9 @@ impl Isa for I8051 {
                 }
                 0x72 | 0x82 | 0xa0 | 0xa2 | 0xb0 => {
                     let bit = bit_addr!();
-                    let val = val!(Trunc(
+                    let val = node!(Trunc(
                         B1,
-                        val!(Int(
+                        node!(Int(
                             IntOp::ShrU,
                             B8,
                             get!(),
@@ -489,38 +499,38 @@ impl Isa for I8051 {
                     state.regs[Reg::PSW_C as usize] = match op {
                         0xa2 => val,
 
-                        0x72 => val!(Int(IntOp::Or, B1, state.regs[Reg::PSW_C as usize], val)),
-                        0xa0 => val!(Int(
+                        0x72 => node!(Int(IntOp::Or, B1, state.regs[Reg::PSW_C as usize], val)),
+                        0xa0 => node!(Int(
                             IntOp::Or,
                             B1,
                             state.regs[Reg::PSW_C as usize],
-                            val!(bit_not(val))
+                            node!(bit_not(val))
                         )),
-                        0xb0 => val!(Int(
+                        0xb0 => node!(Int(
                             IntOp::And,
                             B1,
                             state.regs[Reg::PSW_C as usize],
-                            val!(bit_not(val))
+                            node!(bit_not(val))
                         )),
                         _ => unreachable!(),
                     }
                 }
                 0x73 | 0x83 | 0x93 => {
-                    let addr = val!(Int(
+                    let addr = node!(Int(
                         IntOp::Add,
                         B16,
-                        val!(Int(
+                        node!(Int(
                             IntOp::Or,
                             B16,
-                            val!(Int(
+                            node!(Int(
                                 IntOp::Shl,
                                 B16,
-                                val!(Zext(B16, state.regs[Reg::DPH as usize])),
+                                node!(Zext(B16, state.regs[Reg::DPH as usize])),
                                 cx.a(Const::new(B8, 8))
                             )),
-                            val!(Zext(B16, state.regs[Reg::DPL as usize]))
+                            node!(Zext(B16, state.regs[Reg::DPL as usize]))
                         )),
-                        val!(Zext(B16, state.regs[Reg::A as usize]))
+                        node!(Zext(B16, state.regs[Reg::A as usize]))
                     ));
                     if op == 0x73 {
                         return jump!(addr);
@@ -533,7 +543,7 @@ impl Isa for I8051 {
                         } else {
                             // HACK(eddyb) this uses a B16 memory address to
                             // avoid accidentally aliasing B8 memory addresses.
-                            state.regs[Reg::A as usize] = val!(Load(MemRef {
+                            state.regs[Reg::A as usize] = node!(Load(MemRef {
                                 mem: state.mem,
                                 addr,
                                 size: MemSize::M8,
@@ -552,21 +562,21 @@ impl Isa for I8051 {
                 }
                 0x92 => {
                     let bit = bit_addr!();
-                    set!(val!(Int(
+                    set!(node!(Int(
                         IntOp::Or,
                         B8,
                         get!(),
-                        val!(Int(
+                        node!(Int(
                             IntOp::Shl,
                             B8,
-                            val!(Zext(B8, state.regs[Reg::PSW_C as usize])),
+                            node!(Zext(B8, state.regs[Reg::PSW_C as usize])),
                             cx.a(Const::new(B8, bit as u64))
                         ))
                     )));
                 }
                 0xb2 => {
                     let bit = bit_addr!();
-                    set!(val!(Int(
+                    set!(node!(Int(
                         IntOp::Xor,
                         B8,
                         get!(),
@@ -576,7 +586,7 @@ impl Isa for I8051 {
                 0xc0 => push!(get!(direct!())),
                 0xc2 => {
                     let bit = bit_addr!();
-                    set!(val!(Int(
+                    set!(node!(Int(
                         IntOp::And,
                         B8,
                         get!(),
@@ -586,7 +596,7 @@ impl Isa for I8051 {
                 0xd0 => set!(direct!(), pop!(M8)),
                 0xd2 => {
                     let bit = bit_addr!();
-                    set!(val!(Int(
+                    set!(node!(Int(
                         IntOp::Or,
                         B8,
                         get!(),

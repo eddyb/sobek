@@ -1,5 +1,5 @@
 use crate::ir::{
-    BitSize, Block, Const, Cx, Edge, Edges, Effect, Mem, MemRef, MemSize, State, Use, Val, Visit,
+    BitSize, Block, Const, Cx, Edge, Edges, Effect, MemRef, MemSize, Node, State, Use, Visit,
     Visitor,
 };
 use std::collections::hash_map::Entry;
@@ -77,17 +77,17 @@ impl From<Const> for BlockId {
     }
 }
 
-impl Use<Mem> {
+impl Use<Node> {
     // HACK(eddyb) try to get the last stored value.
     fn subst_reduce_load(
         self,
         cx: &Cx,
         base: Option<&State>,
-        addr: Use<Val>,
+        addr: Use<Node>,
         size: MemSize,
-    ) -> Use<Val> {
+    ) -> Use<Node> {
         match cx[self] {
-            Mem::In => match base {
+            Node::InMem => match base {
                 Some(base) => base.mem.subst_reduce_load(cx, None, addr, size),
                 None => {
                     // HACK(eddyb) assume it's from the ROM, if in range of it.
@@ -97,7 +97,7 @@ impl Use<Mem> {
                         }
                     }
 
-                    cx.a(Val::Load(MemRef {
+                    cx.a(Node::Load(MemRef {
                         mem: self,
                         addr,
                         size,
@@ -105,39 +105,51 @@ impl Use<Mem> {
                 }
             },
 
-            Mem::Store(r, v) => {
+            Node::Store(r, v) => {
                 if r.addr.subst_reduce(cx, base) == addr && r.size == size {
                     v.subst_reduce(cx, base)
                 } else {
                     r.mem.subst_reduce_load(cx, base, addr, size)
                 }
             }
+
+            _ => unreachable!(),
         }
     }
 }
 
 // FIXME(eddyb) introduce a more general "folder" abstraction.
-impl Use<Val> {
+impl Use<Node> {
     fn subst_reduce(self, cx: &Cx, base: Option<&State>) -> Self {
-        let v = match cx[self] {
-            Val::InReg(r) => {
+        cx.a(match cx[self] {
+            Node::InReg(r) => {
                 return base.map_or(self, |base| base.regs[r.index].subst_reduce(cx, None))
             }
 
-            Val::Const(_) => return self,
+            Node::Const(_) => return self,
 
-            Val::Int(op, size, a, b) => {
-                Val::Int(op, size, a.subst_reduce(cx, base), b.subst_reduce(cx, base))
+            Node::Int(op, size, a, b) => {
+                Node::Int(op, size, a.subst_reduce(cx, base), b.subst_reduce(cx, base))
             }
-            Val::Trunc(size, x) => Val::Trunc(size, x.subst_reduce(cx, base)),
-            Val::Sext(size, x) => Val::Sext(size, x.subst_reduce(cx, base)),
-            Val::Zext(size, x) => Val::Zext(size, x.subst_reduce(cx, base)),
-            Val::Load(r) => {
+            Node::Trunc(size, x) => Node::Trunc(size, x.subst_reduce(cx, base)),
+            Node::Sext(size, x) => Node::Sext(size, x.subst_reduce(cx, base)),
+            Node::Zext(size, x) => Node::Zext(size, x.subst_reduce(cx, base)),
+            Node::Load(r) => {
                 let addr = r.addr.subst_reduce(cx, base);
                 return r.mem.subst_reduce_load(cx, base, addr, r.size);
             }
-        };
-        cx.a(v)
+
+            Node::InMem => return base.map_or(self, |base| base.mem.subst_reduce(cx, None)),
+
+            Node::Store(r, x) => Node::Store(
+                MemRef {
+                    mem: r.mem.subst_reduce(cx, base),
+                    addr: r.addr.subst_reduce(cx, base),
+                    size: r.size,
+                },
+                x.subst_reduce(cx, base),
+            ),
+        })
     }
 }
 
@@ -147,7 +159,7 @@ struct ExitOptions {
     /// Argument value for the exit "continuation".
     /// If present, will be back-propagated from
     /// all the jumps to the exit "continuation".
-    arg_value: Option<Use<Val>>,
+    arg_value: Option<Use<Node>>,
 }
 
 struct Partial {
@@ -162,12 +174,12 @@ struct Exit {
     /// Set of non-constant jump destination values.
     /// An empty set indicates the (sub-)CFG diverges, by
     /// eventually reaching infinite loops and/or traps.
-    targets: Set1<Use<Val>>,
+    targets: Set1<Use<Node>>,
 
     /// Set of "continuation argument" values.
     /// Only empty if no argument was provided (see `ExitKey`).
     // TODO(eddyb) should this be per `targets` value?
-    arg_values: Set1<Use<Val>>,
+    arg_values: Set1<Use<Node>>,
 
     /// Indicates whether this (sub-)CFG contains unresolved
     /// cycles, which may have resulted in the computed exit
@@ -374,7 +386,7 @@ impl<'a> Explorer<'a> {
             let target_exit = self.find_exit(target_bb, options);
             // FIXME(eddyb) abstract composing `partial`s better.
             exit.partial = exit.partial.or(target_exit.partial);
-            let mut resolve_values = |values: Set1<Use<Val>>| {
+            let mut resolve_values = |values: Set1<Use<Node>>| {
                 values.flat_map(|value| {
                     // Constants don't need any propagation work.
                     if self.cx[value].as_const().is_some() {
@@ -497,7 +509,7 @@ impl<'a> Explorer<'a> {
             // Can't assume that a certain `targets` set is final,
             // as there could be outer cycles blocking progress.
             let cx = self.cx;
-            let progress = |old: Set1<Use<Val>>, new: Set1<Use<Val>>| match (old, new) {
+            let progress = |old: Set1<Use<Node>>, new: Set1<Use<Node>>| match (old, new) {
                 (Set1::One(old), Set1::One(new)) => {
                     if old != new {
                         println!(

@@ -55,11 +55,7 @@ mod store {
         }
     }
 
-    #[derive(Default)]
-    pub struct PerKind<Val, Mem> {
-        pub val: Val,
-        pub mem: Mem,
-    }
+    // FIXME(eddyb) rename Store to Interner, and adjust adjacent terminology.
 
     pub struct Store<T> {
         // FIXME(Manishearth/elsa#6) switch to `FrozenIndexSet` when available.
@@ -67,7 +63,10 @@ mod store {
         vec: FrozenVec<Box<T>>,
     }
 
-    pub(super) type Stores = PerKind<Store<Val>, Store<Mem>>;
+    #[derive(Default)]
+    pub(super) struct Stores {
+        node: Store<Node>,
+    }
 
     impl<T: Eq + Hash> Default for Store<T> {
         fn default() -> Self {
@@ -106,7 +105,7 @@ mod store {
             let stores = Stores::default();
 
             let default = State {
-                mem: stores.mem.alloc(Mem::In),
+                mem: stores.node.alloc(Node::InMem),
                 regs: vec![],
             };
 
@@ -123,77 +122,64 @@ mod store {
     }
 
     pub trait AllocIn: Sized {
-        type Kind;
-        fn alloc_in(self, cx: &Cx) -> Use<Self::Kind>;
+        type Interned;
+        fn alloc_in(self, cx: &Cx) -> Self::Interned;
     }
 
     // FIXME(eddyb) is this sort of thing even needed anymore?
-    impl<K: AllocIn<Kind = K>, F: FnOnce(&Cx) -> K> AllocIn for F {
-        type Kind = K;
-        fn alloc_in(self, cx: &Cx) -> Use<K> {
+    impl<T: AllocIn<Interned = Use<T>>, F: FnOnce(&Cx) -> T> AllocIn for F {
+        type Interned = Use<T>;
+        fn alloc_in(self, cx: &Cx) -> Use<T> {
             self(cx).alloc_in(cx)
         }
     }
 
     impl Cx {
-        pub fn a<T: AllocIn>(&self, x: T) -> Use<T::Kind> {
+        pub fn a<T: AllocIn>(&self, x: T) -> T::Interned {
             x.alloc_in(self)
         }
     }
 
-    macro_rules! per_kind_impls {
-        ($field:ident: $k:ident, fmt($prefix:literal)) => {
-            impl<Val, Mem> Index<Use<super::$k>> for PerKind<Val, Mem>
-            where
-                $k: Index<Use<super::$k>>,
-            {
-                type Output = $k::Output;
-                fn index(&self, u: Use<super::$k>) -> &Self::Output {
-                    self.$field.index(u)
-                }
+    impl AllocIn for Node {
+        type Interned = Use<Self>;
+        fn alloc_in(self, cx: &Cx) -> Use<Self> {
+            match self.normalize(cx) {
+                Ok(x) => cx.stores.node.alloc(x),
+                Err(u) => u,
             }
-
-            impl AllocIn for $k {
-                type Kind = Self;
-                fn alloc_in(self, cx: &Cx) -> Use<Self> {
-                    match self.normalize(cx) {
-                        Ok(x) => cx.stores.$field.alloc(x),
-                        Err(u) => u,
-                    }
-                }
-            }
-
-            impl fmt::Debug for Use<$k> {
-                fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                    let local = if DBG_LOCALS.is_set() {
-                        DBG_LOCALS.with(|maps| maps.$field.get(self).copied())
-                    } else {
-                        None
-                    };
-                    match local {
-                        Some(i) => write!(f, concat!($prefix, "{}"), i),
-                        None => {
-                            if DBG_CX.is_set() {
-                                DBG_CX.with(|cx| write!(f, "{:?}", &cx[*self]))
-                            } else {
-                                write!(f, concat!($prefix, "#{:x}"), self.idx)
-                            }
-                        }
-                    }
-                }
-            }
-        };
+        }
     }
 
-    per_kind_impls!(val: Val, fmt("v"));
-    per_kind_impls!(mem: Mem, fmt("m"));
+    impl Index<Use<Node>> for Cx {
+        type Output = Node;
+        fn index(&self, node: Use<Node>) -> &Self::Output {
+            self.stores.node.index(node)
+        }
+    }
+
+    impl fmt::Debug for Use<Node> {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            let local = if DBG_LOCALS.is_set() {
+                DBG_LOCALS.with(|locals| locals.get(self).copied())
+            } else {
+                None
+            };
+            match local {
+                Some((prefix, i)) => write!(f, "{}{}", prefix, i),
+                None => {
+                    if DBG_CX.is_set() {
+                        DBG_CX.with(|cx| write!(f, "{:?}", &cx[*self]))
+                    } else {
+                        write!(f, "node#{:x}", self.idx)
+                    }
+                }
+            }
+        }
+    }
 }
 
 scoped_thread_local!(static DBG_CX: Cx);
-scoped_thread_local!(static DBG_LOCALS: PerKind<
-    HashMap<Use<Val>, usize>,
-    HashMap<Use<Mem>, usize>,
->);
+scoped_thread_local!(static DBG_LOCALS: HashMap<Use<Node>, (&'static str, usize)>);
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BitSize {
@@ -263,9 +249,9 @@ impl fmt::Debug for Const {
 }
 
 impl AllocIn for Const {
-    type Kind = Val;
-    fn alloc_in(self, cx: &Cx) -> Use<Val> {
-        cx.a(Val::Const(self))
+    type Interned = Use<Node>;
+    fn alloc_in(self, cx: &Cx) -> Use<Node> {
+        cx.a(Node::Const(self))
     }
 }
 
@@ -512,6 +498,21 @@ impl fmt::Debug for Reg {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Type {
+    Bits(BitSize),
+    Mem,
+}
+
+impl Type {
+    pub fn bit_size(self) -> Result<BitSize, Type> {
+        match self {
+            Type::Bits(size) => Ok(size),
+            _ => Err(self),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MemSize {
     M8,
     M16,
@@ -552,8 +553,8 @@ impl MemSize {
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct MemRef {
-    pub mem: Use<Mem>,
-    pub addr: Use<Val>,
+    pub mem: Use<Node>,
+    pub addr: Use<Node>,
     pub size: MemSize,
 }
 
@@ -580,34 +581,40 @@ impl MemRef {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub enum Val {
+pub enum Node {
+    // Bits nodes.
     InReg(Reg),
 
     Const(Const),
-    Int(IntOp, BitSize, Use<Val>, Use<Val>),
-    Trunc(BitSize, Use<Val>),
-    Sext(BitSize, Use<Val>),
-    Zext(BitSize, Use<Val>),
+    Int(IntOp, BitSize, Use<Node>, Use<Node>),
+    Trunc(BitSize, Use<Node>),
+    Sext(BitSize, Use<Node>),
+    Zext(BitSize, Use<Node>),
 
     Load(MemRef),
+
+    // Mem nodes.
+    InMem,
+
+    Store(MemRef, Use<Node>),
 }
 
-impl fmt::Debug for Val {
+impl fmt::Debug for Node {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Val::InReg(r) => write!(f, "in.{:?}", r),
-            Val::Const(c) => c.fmt(f),
-            Val::Int(op, size, a, b) => {
-                let get_inline_val = |v: Use<Val>| {
+            Node::InReg(r) => write!(f, "in.{:?}", r),
+            Node::Const(c) => c.fmt(f),
+            Node::Int(op, size, a, b) => {
+                let get_inline_node = |node: Use<Node>| {
                     let not_inline =
-                        DBG_LOCALS.is_set() && DBG_LOCALS.with(|maps| maps.val.contains_key(&v));
+                        DBG_LOCALS.is_set() && DBG_LOCALS.with(|locals| locals.contains_key(&node));
                     if !not_inline && DBG_CX.is_set() {
-                        Some(DBG_CX.with(|cx| cx[v]))
+                        Some(DBG_CX.with(|cx| cx[node]))
                     } else {
                         None
                     }
                 };
-                let as_unop = |v: Val| v.as_unop(|c| get_inline_val(c)?.as_const());
+                let as_unop = |node: Node| node.as_unop(|c| get_inline_node(c)?.as_const());
 
                 // `-x` and `!x`.
                 if let Some((unary_op, x)) = as_unop(*self) {
@@ -616,7 +623,7 @@ impl fmt::Debug for Val {
 
                 // `a - b`.
                 if let IntOp::Add = op {
-                    if let Some(b) = get_inline_val(*b) {
+                    if let Some(b) = get_inline_node(*b) {
                         if let Some(b) = b.as_const() {
                             // HACK(eddyb) assume adds are subs by constant if
                             // the constant is small in absolute magnitude
@@ -649,50 +656,63 @@ impl fmt::Debug for Val {
                     b
                 )
             }
-            Val::Trunc(size, x) => write!(f, "trunc{}({:?})", size.bits_subscript(), x),
-            Val::Sext(size, x) => write!(f, "sext{}({:?})", size.bits_subscript(), x),
-            Val::Zext(size, x) => write!(f, "zext{}({:?})", size.bits_subscript(), x),
-            Val::Load(r) => write!(f, "{:?}[{:?}]{}", r.mem, r.addr, r.size.bits_subscript()),
+            Node::Trunc(size, x) => write!(f, "trunc{}({:?})", size.bits_subscript(), x),
+            Node::Sext(size, x) => write!(f, "sext{}({:?})", size.bits_subscript(), x),
+            Node::Zext(size, x) => write!(f, "zext{}({:?})", size.bits_subscript(), x),
+            Node::Load(r) => write!(f, "{:?}[{:?}]{}", r.mem, r.addr, r.size.bits_subscript()),
+
+            Node::InMem => write!(f, "in.m"),
+            Node::Store(r, x) => write!(
+                f,
+                "{:?}[{:?}]{} <- {:?}",
+                r.mem,
+                r.addr,
+                r.size.bits_subscript(),
+                x
+            ),
         }
     }
 }
 
-impl Val {
+impl Node {
     // FIXME(eddyb) should these take `&Cx` instead?
-    pub fn int_neg(v: Use<Val>) -> impl AllocIn<Kind = Self> {
+    pub fn int_neg(v: Use<Node>) -> impl AllocIn<Interned = Use<Self>> {
         move |cx: &Cx| {
-            let size = cx[v].size();
-            Val::Int(IntOp::Mul, size, v, cx.a(Const::new(size, size.mask())))
+            let size = cx[v].ty().bit_size().unwrap();
+            Node::Int(IntOp::Mul, size, v, cx.a(Const::new(size, size.mask())))
         }
     }
 
-    pub fn int_sub(a: Use<Val>, b: Use<Val>) -> impl AllocIn<Kind = Self> {
+    pub fn int_sub(a: Use<Node>, b: Use<Node>) -> impl AllocIn<Interned = Use<Self>> {
         move |cx: &Cx| {
-            let size = cx[a].size();
-            Val::Int(IntOp::Add, size, a, cx.a(Val::int_neg(b)))
+            let size = cx[a].ty().bit_size().unwrap();
+            Node::Int(IntOp::Add, size, a, cx.a(Node::int_neg(b)))
         }
     }
 
-    pub fn bit_not(v: Use<Val>) -> impl AllocIn<Kind = Self> {
+    pub fn bit_not(v: Use<Node>) -> impl AllocIn<Interned = Use<Self>> {
         move |cx: &Cx| {
-            let size = cx[v].size();
-            Val::Int(IntOp::Xor, size, v, cx.a(Const::new(size, size.mask())))
+            let size = cx[v].ty().bit_size().unwrap();
+            Node::Int(IntOp::Xor, size, v, cx.a(Const::new(size, size.mask())))
         }
     }
 
-    pub fn bit_rol(v: Use<Val>, n: Use<Val>) -> impl AllocIn<Kind = Self> {
+    pub fn bit_rol(v: Use<Node>, n: Use<Node>) -> impl AllocIn<Interned = Use<Self>> {
         move |cx: &Cx| {
-            let size = cx[v].size();
-            Val::Int(
+            let size = cx[v].ty().bit_size().unwrap();
+            Node::Int(
                 IntOp::Or,
                 size,
-                cx.a(Val::Int(IntOp::Shl, size, v, n)),
-                cx.a(Val::Int(
+                cx.a(Node::Int(IntOp::Shl, size, v, n)),
+                cx.a(Node::Int(
                     IntOp::ShrU,
                     size,
                     v,
-                    cx.a(Val::int_sub(
-                        cx.a(Const::new(cx[n].size(), size.bits() as u64)),
+                    cx.a(Node::int_sub(
+                        cx.a(Const::new(
+                            cx[n].ty().bit_size().unwrap(),
+                            size.bits() as u64,
+                        )),
                         n,
                     )),
                 )),
@@ -700,19 +720,22 @@ impl Val {
         }
     }
 
-    pub fn bit_ror(v: Use<Val>, n: Use<Val>) -> impl AllocIn<Kind = Self> {
+    pub fn bit_ror(v: Use<Node>, n: Use<Node>) -> impl AllocIn<Interned = Use<Self>> {
         move |cx: &Cx| {
-            let size = cx[v].size();
-            Val::Int(
+            let size = cx[v].ty().bit_size().unwrap();
+            Node::Int(
                 IntOp::Or,
                 size,
-                cx.a(Val::Int(IntOp::ShrU, size, v, n)),
-                cx.a(Val::Int(
+                cx.a(Node::Int(IntOp::ShrU, size, v, n)),
+                cx.a(Node::Int(
                     IntOp::Shl,
                     size,
                     v,
-                    cx.a(Val::int_sub(
-                        cx.a(Const::new(cx[n].size(), size.bits() as u64)),
+                    cx.a(Node::int_sub(
+                        cx.a(Const::new(
+                            cx[n].ty().bit_size().unwrap(),
+                            size.bits() as u64,
+                        )),
                         n,
                     )),
                 )),
@@ -720,26 +743,29 @@ impl Val {
         }
     }
 
-    pub fn size(&self) -> BitSize {
+    pub fn ty(&self) -> Type {
         match self {
-            Val::InReg(r) => r.size,
-            Val::Const(c) => c.size,
+            Node::InReg(r) => Type::Bits(r.size),
+            Node::Const(c) => Type::Bits(c.size),
 
-            Val::Int(IntOp::Eq, _, _, _)
-            | Val::Int(IntOp::LtS, _, _, _)
-            | Val::Int(IntOp::LtU, _, _, _) => BitSize::B1,
+            Node::Int(IntOp::Eq, _, _, _)
+            | Node::Int(IntOp::LtS, _, _, _)
+            | Node::Int(IntOp::LtU, _, _, _) => Type::Bits(BitSize::B1),
 
-            Val::Int(_, size, _, _)
-            | Val::Trunc(size, _)
-            | Val::Sext(size, _)
-            | Val::Zext(size, _) => *size,
-            Val::Load(r) => r.size.into(),
+            Node::Int(_, size, _, _)
+            | Node::Trunc(size, _)
+            | Node::Sext(size, _)
+            | Node::Zext(size, _) => Type::Bits(*size),
+
+            Node::Load(r) => Type::Bits(r.size.into()),
+
+            Node::InMem | Node::Store(..) => Type::Mem,
         }
     }
 
     pub fn as_const(&self) -> Option<Const> {
         match *self {
-            Val::Const(x) => Some(x),
+            Node::Const(x) => Some(x),
             _ => None,
         }
     }
@@ -748,9 +774,9 @@ impl Val {
     /// Note that `-1` and `!0` are the same all-ones bitpattern.
     fn as_unop(
         &self,
-        get_const: impl FnOnce(Use<Val>) -> Option<Const>,
-    ) -> Option<(char, Use<Val>)> {
-        if let Val::Int(op, size, a, b) = *self {
+        get_const: impl FnOnce(Use<Node>) -> Option<Const>,
+    ) -> Option<(char, Use<Node>)> {
+        if let Node::Int(op, size, a, b) = *self {
             if let IntOp::Mul | IntOp::Xor = op {
                 let all_ones = Const::new(size, size.mask());
                 if get_const(b) == Some(all_ones) {
@@ -769,12 +795,13 @@ impl Val {
     fn normalize(self, cx: &Cx) -> Result<Self, Use<Self>> {
         // TODO(eddyb) resolve loads.
 
-        if let Val::Const(c) = self {
+        if let Node::Const(c) = self {
             assert_eq!(c.bits, c.bits & c.size.mask());
         }
 
-        if let Val::Int(op, size, a, b) = self {
-            let a_size = cx[a].size();
+        if let Node::Int(op, size, a, b) = self {
+            let a_size = cx[a].ty().bit_size().unwrap();
+            let b_size = cx[b].ty().bit_size().unwrap();
             assert_eq!(a_size, size);
 
             let is_shift = match op {
@@ -782,13 +809,13 @@ impl Val {
                 _ => false,
             };
             if !is_shift {
-                assert_eq!(a_size, cx[b].size());
+                assert_eq!(a_size, b_size);
             }
 
             let c_a = cx[a].as_const();
             let c_b = cx[b].as_const();
             if let Some(r) = op.simplify(c_a.ok_or(a), c_b.ok_or(b)) {
-                return r.map(Val::Const);
+                return r.map(Node::Const);
             }
 
             // FIXME(eddyb) clean up the naming schemes in these pattern-matches.
@@ -797,15 +824,15 @@ impl Val {
             // HACK(eddyb) replace `x + a` with `a + x` where `x` is constant.
             // See also the TODO below about sorting symmetric ops.
             if op == IntOp::Add && c_a.is_some() && c_b.is_none() {
-                return Val::Int(IntOp::Add, size, b, a).normalize(cx);
+                return Node::Int(IntOp::Add, size, b, a).normalize(cx);
             }
 
             // HACK(eddyb) fuse `(a + x) + y` where `x` and `y` are constants.
             match (op, cx[a], cx[b]) {
-                (IntOp::Add, Val::Int(IntOp::Add, _, a, b), Val::Const(y)) => {
-                    if let Val::Const(x) = cx[b] {
+                (IntOp::Add, Node::Int(IntOp::Add, _, a, b), Node::Const(y)) => {
+                    if let Node::Const(x) = cx[b] {
                         if let Some(xy) = IntOp::Add.eval(x, y) {
-                            return Val::Int(IntOp::Add, size, a, cx.a(xy)).normalize(cx);
+                            return Node::Int(IntOp::Add, size, a, cx.a(xy)).normalize(cx);
                         }
                     }
                 }
@@ -814,10 +841,10 @@ impl Val {
 
             // HACK(eddyb) fuse `(a & x) & y` where `x` and `y` are constants.
             match (op, cx[a], cx[b]) {
-                (IntOp::And, Val::Int(IntOp::And, _, a, b), Val::Const(y)) => {
-                    if let Val::Const(x) = cx[b] {
+                (IntOp::And, Node::Int(IntOp::And, _, a, b), Node::Const(y)) => {
+                    if let Node::Const(x) = cx[b] {
                         if let Some(xy) = IntOp::And.eval(x, y) {
-                            return Val::Int(IntOp::And, size, a, cx.a(xy)).normalize(cx);
+                            return Node::Int(IntOp::And, size, a, cx.a(xy)).normalize(cx);
                         }
                     }
                 }
@@ -826,26 +853,26 @@ impl Val {
 
             // Simplify `x + x` to `x << 1`.
             if op == IntOp::Add && a == b {
-                return Val::Int(IntOp::Shl, size, a, cx.a(Const::new(BitSize::B8, 1)))
+                return Node::Int(IntOp::Shl, size, a, cx.a(Const::new(BitSize::B8, 1)))
                     .normalize(cx);
             }
 
             // Simplify `x ^ x` to `0`.
             if op == IntOp::Xor && a == b {
-                return Ok(Val::Const(Const::new(size, 0)));
+                return Ok(Node::Const(Const::new(size, 0)));
             }
 
             // HACK(eddyb) remove redundant `x & mask` where `x` has enough
             // bits known (e.g. it's an unsigned shift left/right, or zext).
             match (op, cx[a], cx[b]) {
-                (IntOp::And, Val::Int(IntOp::Shl, ..), Val::Const(mask))
-                | (IntOp::And, Val::Int(IntOp::ShrU, ..), Val::Const(mask))
-                | (IntOp::And, Val::Zext(..), Val::Const(mask)) => {
+                (IntOp::And, Node::Int(IntOp::Shl, ..), Node::Const(mask))
+                | (IntOp::And, Node::Int(IntOp::ShrU, ..), Node::Const(mask))
+                | (IntOp::And, Node::Zext(..), Node::Const(mask)) => {
                     let zero = Const::new(size, 0);
 
                     let present_bits = match cx[a] {
-                        Val::Int(shift_op @ IntOp::Shl, _, _, shift)
-                        | Val::Int(shift_op @ IntOp::ShrU, _, _, shift) => {
+                        Node::Int(shift_op @ IntOp::Shl, _, _, shift)
+                        | Node::Int(shift_op @ IntOp::ShrU, _, _, shift) => {
                             let all_ones = Const::new(size, size.mask());
                             cx[shift]
                                 .as_const()
@@ -853,14 +880,16 @@ impl Val {
                                 .unwrap_or(all_ones)
                         }
 
-                        Val::Zext(_, inner) => Const::new(size, cx[inner].size().mask()),
+                        Node::Zext(_, inner) => {
+                            Const::new(size, cx[inner].ty().bit_size().unwrap().mask())
+                        }
 
                         _ => unreachable!(),
                     };
 
                     if let Some(masked_bits) = IntOp::And.eval(present_bits, mask) {
                         if masked_bits == zero {
-                            return Ok(Val::Const(zero));
+                            return Ok(Node::Const(zero));
                         }
                         if masked_bits == present_bits {
                             return Err(a);
@@ -872,13 +901,13 @@ impl Val {
 
             // HACK(eddyb) replace `x >> n << n` or `x << n >> n` with `x & mask`.
             match (op, cx[a], cx[b]) {
-                (IntOp::Shl, Val::Int(inner_op @ IntOp::ShrU, _, x, n2), Val::Const(n))
-                | (IntOp::ShrU, Val::Int(inner_op @ IntOp::Shl, _, x, n2), Val::Const(n)) => {
-                    if cx[n2] == Val::Const(n) {
+                (IntOp::Shl, Node::Int(inner_op @ IntOp::ShrU, _, x, n2), Node::Const(n))
+                | (IntOp::ShrU, Node::Int(inner_op @ IntOp::Shl, _, x, n2), Node::Const(n)) => {
+                    if cx[n2] == Node::Const(n) {
                         let all_ones = Const::new(size, size.mask());
                         if let Some(inner) = inner_op.eval(all_ones, n) {
                             if let Some(mask) = op.eval(inner, n) {
-                                return Val::Int(IntOp::And, size, x, cx.a(mask)).normalize(cx);
+                                return Node::Int(IntOp::And, size, x, cx.a(mask)).normalize(cx);
                             }
                         }
                     }
@@ -888,11 +917,11 @@ impl Val {
 
             // HACK(eddyb) replace `(x & c1) | (x & c2)` with `x & (c1 | c2)`.
             match (op, cx[a], cx[b]) {
-                (IntOp::Or, Val::Int(IntOp::And, _, x1, c1), Val::Int(IntOp::And, _, x2, c2)) => {
+                (IntOp::Or, Node::Int(IntOp::And, _, x1, c1), Node::Int(IntOp::And, _, x2, c2)) => {
                     if x1 == x2 {
-                        if let (Val::Const(c1), Val::Const(c2)) = (cx[c1], cx[c2]) {
+                        if let (Node::Const(c1), Node::Const(c2)) = (cx[c1], cx[c2]) {
                             if let Some(c) = IntOp::Or.eval(c1, c2) {
-                                return Val::Int(IntOp::And, size, x1, cx.a(c)).normalize(cx);
+                                return Node::Int(IntOp::And, size, x1, cx.a(c)).normalize(cx);
                             }
                         }
                     }
@@ -902,12 +931,12 @@ impl Val {
 
             // HACK(eddyb) replace `(x | y) & c` with `(x & c) | (y & c)`.
             match (op, cx[a], cx[b]) {
-                (IntOp::And, Val::Int(IntOp::Or, _, x, y), Val::Const(_)) => {
-                    return Val::Int(
+                (IntOp::And, Node::Int(IntOp::Or, _, x, y), Node::Const(_)) => {
+                    return Node::Int(
                         IntOp::Or,
                         size,
-                        cx.a(Val::Int(IntOp::And, size, x, b)),
-                        cx.a(Val::Int(IntOp::And, size, y, b)),
+                        cx.a(Node::Int(IntOp::And, size, x, b)),
+                        cx.a(Node::Int(IntOp::And, size, y, b)),
                     )
                     .normalize(cx);
                 }
@@ -916,57 +945,57 @@ impl Val {
         }
 
         // FIXME(eddyb) deduplicate these
-        if let Val::Trunc(size, x) = self {
-            let x_size = cx[x].size();
+        if let Node::Trunc(size, x) = self {
+            let x_size = cx[x].ty().bit_size().unwrap();
             assert!(size < x_size);
 
             if let Some(c) = cx[x].as_const() {
-                return Ok(Val::Const(Const::new(size, c.as_u64() & size.mask())));
+                return Ok(Node::Const(Const::new(size, c.as_u64() & size.mask())));
             }
 
             // HACK(eddyb) replace `trunc({s,z}ext(y))` with something simpler.
             // NOTE(eddyb) this doesn't seem to be hit in practice, maybe remove?
-            if let Val::Sext(_, y) | Val::Zext(_, y) = cx[x] {
-                let y_size = cx[y].size();
+            if let Node::Sext(_, y) | Node::Zext(_, y) = cx[x] {
+                let y_size = cx[y].ty().bit_size().unwrap();
                 return if size == y_size {
                     Err(y)
                 } else if size < y_size {
-                    Val::Trunc(size, y).normalize(cx)
+                    Node::Trunc(size, y).normalize(cx)
                 } else {
                     match cx[x] {
-                        Val::Sext(..) => Val::Sext(size, y).normalize(cx),
-                        Val::Zext(..) => Val::Zext(size, y).normalize(cx),
+                        Node::Sext(..) => Node::Sext(size, y).normalize(cx),
+                        Node::Zext(..) => Node::Zext(size, y).normalize(cx),
                         _ => unreachable!(),
                     }
                 };
             }
         }
 
-        if let Val::Sext(size, x) = self {
-            let x_size = cx[x].size();
+        if let Node::Sext(size, x) = self {
+            let x_size = cx[x].ty().bit_size().unwrap();
             assert!(size > x_size);
 
             if let Some(c) = cx[x].as_const() {
-                return Ok(Val::Const(Const::new(
+                return Ok(Node::Const(Const::new(
                     size,
                     (c.as_i64() as u64) & size.mask(),
                 )));
             }
         }
 
-        if let Val::Zext(size, x) = self {
-            let x_size = cx[x].size();
+        if let Node::Zext(size, x) = self {
+            let x_size = cx[x].ty().bit_size().unwrap();
             assert!(size > x_size);
 
             if let Some(c) = cx[x].as_const() {
-                return Ok(Val::Const(Const::new(size, c.as_u64())));
+                return Ok(Node::Const(Const::new(size, c.as_u64())));
             }
 
             // HACK(eddyb) replace `zext(trunc(y))` by `y & mask`.
-            if let Val::Trunc(_, y) = cx[x] {
-                let y_size = cx[y].size();
+            if let Node::Trunc(_, y) = cx[x] {
+                let y_size = cx[y].ty().bit_size().unwrap();
                 if size == y_size {
-                    return Val::Int(
+                    return Node::Int(
                         IntOp::And,
                         y_size,
                         y,
@@ -975,6 +1004,17 @@ impl Val {
                     .normalize(cx);
                 }
             }
+        }
+
+        if let Node::Load(r) = self {
+            assert_eq!(cx[r.mem].ty(), Type::Mem);
+        }
+
+        if let Node::Store(r, v) = self {
+            assert_eq!(cx[r.mem].ty(), Type::Mem);
+
+            let r_size: BitSize = r.size.into();
+            assert_eq!(cx[v].ty(), Type::Bits(r_size));
         }
 
         // TODO(eddyb) sort symmetric ops.
@@ -987,17 +1027,8 @@ impl Val {
 pub trait Visitor: Sized {
     fn cx(&self) -> &Cx;
 
-    fn visit_val_use(&mut self, v: Use<Val>) {
-        v.walk(self);
-    }
-    fn visit_mem_use(&mut self, m: Use<Mem>) {
-        m.walk(self);
-    }
-    fn visit_val(&mut self, val: &Val) {
-        val.walk(self);
-    }
-    fn visit_mem(&mut self, mem: &Mem) {
-        mem.walk(self);
+    fn visit_node(&mut self, node: Use<Node>) {
+        node.walk(self);
     }
 }
 
@@ -1024,130 +1055,66 @@ impl<T: Visit> Visit for &'_ T {
     }
 }
 
-impl Visit for Use<Val> {
+impl Visit for Use<Node> {
     fn walk(&self, visitor: &mut impl Visitor) {
-        let val = visitor.cx()[*self];
-        val.visit(visitor);
+        let node = visitor.cx()[*self];
+        node.visit(visitor);
     }
     fn visit(&self, visitor: &mut impl Visitor) {
-        visitor.visit_val_use(*self);
+        visitor.visit_node(*self);
     }
 }
 
-impl Visit for Val {
-    fn walk(&self, visitor: &mut impl Visitor) {
-        match *self {
-            Val::InReg(_) | Val::Const(_) => {}
-            Val::Int(_, _, a, b) => {
-                visitor.visit_val_use(a);
-                visitor.visit_val_use(b);
-            }
-            Val::Trunc(_, x) | Val::Sext(_, x) | Val::Zext(_, x) => visitor.visit_val_use(x),
-            Val::Load(r) => {
-                visitor.visit_mem_use(r.mem);
-                visitor.visit_val_use(r.addr);
-            }
-        }
-    }
-    fn visit(&self, visitor: &mut impl Visitor) {
-        visitor.visit_val(self);
-    }
-}
-
-impl Use<Val> {
-    pub fn subst(self, cx: &Cx, base: &State) -> Self {
-        let v = match cx[self] {
-            Val::InReg(r) => return base.regs[r.index],
-
-            Val::Const(_) => return self,
-
-            Val::Int(op, size, a, b) => Val::Int(op, size, a.subst(cx, base), b.subst(cx, base)),
-            Val::Trunc(size, x) => Val::Trunc(size, x.subst(cx, base)),
-            Val::Sext(size, x) => Val::Sext(size, x.subst(cx, base)),
-            Val::Zext(size, x) => Val::Zext(size, x.subst(cx, base)),
-            Val::Load(r) => Val::Load(r.subst(cx, base)),
-        };
-        cx.a(v)
-    }
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub enum Mem {
-    In,
-
-    Store(MemRef, Use<Val>),
-}
-
-impl fmt::Debug for Mem {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Mem::In => write!(f, "in.m"),
-            Mem::Store(r, x) => write!(
-                f,
-                "{:?}[{:?}]{} <- {:?}",
-                r.mem,
-                r.addr,
-                r.size.bits_subscript(),
-                x
-            ),
-        }
-    }
-}
-
-impl Mem {
-    fn normalize(self, cx: &Cx) -> Result<Self, Use<Self>> {
-        if let Mem::Store(r, v) = self {
-            let r_size: BitSize = r.size.into();
-            assert_eq!(r_size, cx[v].size());
-        }
-
-        Ok(self)
-    }
-}
-
-impl Visit for Use<Mem> {
-    fn walk(&self, visitor: &mut impl Visitor) {
-        let mem = visitor.cx()[*self];
-        mem.visit(visitor);
-    }
-    fn visit(&self, visitor: &mut impl Visitor) {
-        visitor.visit_mem_use(*self);
-    }
-}
-
-impl Visit for Mem {
+impl Visit for Node {
     fn walk(&self, visitor: &mut impl Visitor) {
         match *self {
-            Mem::In => {}
-            Mem::Store(r, x) => {
-                visitor.visit_mem_use(r.mem);
-                visitor.visit_val_use(r.addr);
-                visitor.visit_val_use(x);
+            Node::InReg(_) | Node::Const(_) => {}
+            Node::Int(_, _, a, b) => {
+                visitor.visit_node(a);
+                visitor.visit_node(b);
+            }
+            Node::Trunc(_, x) | Node::Sext(_, x) | Node::Zext(_, x) => visitor.visit_node(x),
+            Node::Load(r) => {
+                visitor.visit_node(r.mem);
+                visitor.visit_node(r.addr);
+            }
+            Node::InMem => {}
+            Node::Store(r, x) => {
+                visitor.visit_node(r.mem);
+                visitor.visit_node(r.addr);
+                visitor.visit_node(x);
             }
         }
     }
-    fn visit(&self, visitor: &mut impl Visitor) {
-        visitor.visit_mem(self);
-    }
 }
 
-impl Use<Mem> {
+impl Use<Node> {
     pub fn subst(self, cx: &Cx, base: &State) -> Self {
-        let m = match cx[self] {
-            Mem::In => return base.mem,
+        cx.a(match cx[self] {
+            Node::InReg(r) => return base.regs[r.index],
 
-            Mem::Store(r, x) => Mem::Store(r.subst(cx, base), x.subst(cx, base)),
-        };
-        cx.a(m)
+            Node::Const(_) => return self,
+
+            Node::Int(op, size, a, b) => Node::Int(op, size, a.subst(cx, base), b.subst(cx, base)),
+            Node::Trunc(size, x) => Node::Trunc(size, x.subst(cx, base)),
+            Node::Sext(size, x) => Node::Sext(size, x.subst(cx, base)),
+            Node::Zext(size, x) => Node::Zext(size, x.subst(cx, base)),
+
+            Node::Load(r) => Node::Load(r.subst(cx, base)),
+
+            Node::InMem => return base.mem,
+
+            Node::Store(r, x) => Node::Store(r.subst(cx, base), x.subst(cx, base)),
+        })
     }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum Effect {
-    Jump(Use<Val>),
+    Jump(Use<Node>),
 
-    // FIXME(eddyb) support this better, add Val/Mem args, etc.
-    Opaque { call: String, next_pc: Use<Val> },
+    // FIXME(eddyb) support this better, add Node args, etc.
+    Opaque { call: String, next_pc: Use<Node> },
 
     Error(String),
 }
@@ -1169,7 +1136,7 @@ impl Visit for Effect {
             | Effect::Opaque {
                 next_pc: target, ..
             } => {
-                visitor.visit_val_use(target);
+                visitor.visit_node(target);
             }
             Effect::Error(_) => {}
         }
@@ -1178,18 +1145,18 @@ impl Visit for Effect {
 
 #[derive(Clone)]
 pub struct State {
-    pub mem: Use<Mem>,
-    pub regs: Vec<Use<Val>>,
+    pub mem: Use<Node>,
+    pub regs: Vec<Use<Node>>,
 }
 
 impl Visit for State {
     fn walk(&self, visitor: &mut impl Visitor) {
         if self.mem != visitor.cx().default.mem {
-            visitor.visit_mem_use(self.mem);
+            visitor.visit_node(self.mem);
         }
         for (i, &v) in self.regs.iter().enumerate() {
             if v != visitor.cx().default.regs[i] {
-                visitor.visit_val_use(v);
+                visitor.visit_node(v);
             }
         }
     }
@@ -1211,7 +1178,7 @@ impl Visit for Edge {
 #[derive(Copy, Clone)]
 pub enum Edges<T> {
     One(T),
-    Branch { cond: Use<Val>, t: T, e: T },
+    Branch { cond: Use<Node>, t: T, e: T },
 }
 
 impl<T: fmt::Debug> fmt::Debug for Edges<T> {
@@ -1232,7 +1199,7 @@ impl<T: Visit> Visit for Edges<T> {
                 edge.visit(visitor);
             }
             Edges::Branch { cond, t, e } => {
-                visitor.visit_val_use(*cond);
+                visitor.visit_node(*cond);
                 t.visit(visitor);
                 e.visit(visitor);
             }
@@ -1281,7 +1248,7 @@ pub struct Block {
 pub trait Isa {
     fn addr_size(&self) -> BitSize;
 
-    fn default_regs(&self, cx: &Cx) -> Vec<Use<Val>>;
+    fn default_regs(&self, cx: &Cx) -> Vec<Use<Node>>;
 
     // FIXME(eddyb) replace the `Result` with a dedicated enum.
     fn lift_instr(&self, cx: &Cx, pc: &mut Const, state: State) -> Result<State, Edges<Edge>>;
@@ -1384,16 +1351,6 @@ pub struct Cx {
     pub default: State,
 }
 
-impl<K> Index<K> for Cx
-where
-    Stores: Index<K>,
-{
-    type Output = <Stores as Index<K>>::Output;
-    fn index(&self, k: K) -> &Self::Output {
-        self.stores.index(k)
-    }
-}
-
 impl Cx {
     pub fn pretty_print<'a>(
         &'a self,
@@ -1412,11 +1369,11 @@ impl Cx {
         edge_states_and_values: Edges<(&'a State, &'a (impl Visit + fmt::Debug))>,
     ) -> impl fmt::Display + 'a {
         struct Data {
-            use_counts: PerKind<HashMap<Use<Val>, usize>, HashMap<Use<Mem>, usize>>,
-            numbered_counts: PerKind<usize, usize>,
-            locals: PerKind<HashMap<Use<Val>, usize>, HashMap<Use<Mem>, usize>>,
-            val_to_state_regs: HashMap<Use<Val>, Vec<Reg>>,
-            state_mem: Option<Use<Mem>>,
+            use_counts: HashMap<Use<Node>, usize>,
+            numbered_counts: HashMap<&'static str, usize>,
+            locals: HashMap<Use<Node>, (&'static str, usize)>,
+            val_to_state_regs: HashMap<Use<Node>, Vec<Reg>>,
+            state_mem: Option<Use<Node>>,
         }
 
         struct UseCounter<'a> {
@@ -1429,18 +1386,11 @@ impl Cx {
                 self.cx
             }
 
-            fn visit_val_use(&mut self, v: Use<Val>) {
-                let count = self.data.use_counts.val.entry(v).or_insert(0);
+            fn visit_node(&mut self, node: Use<Node>) {
+                let count = self.data.use_counts.entry(node).or_insert(0);
                 *count += 1;
                 if *count == 1 {
-                    v.walk(self);
-                }
-            }
-            fn visit_mem_use(&mut self, m: Use<Mem>) {
-                let count = self.data.use_counts.mem.entry(m).or_insert(0);
-                *count += 1;
-                if *count == 1 {
-                    m.walk(self);
+                    node.walk(self);
                 }
             }
         }
@@ -1456,78 +1406,58 @@ impl Cx {
                 self.cx
             }
 
-            fn visit_val_use(&mut self, v: Use<Val>) {
-                if self.data.locals.val.contains_key(&v) {
+            fn visit_node(&mut self, node: Use<Node>) {
+                if self.data.locals.contains_key(&node) {
                     return;
                 }
 
-                let val = self.cx[v];
-
                 let allowed_inline = mem::replace(&mut self.allow_inline, false);
-                match val {
-                    Val::Load(r) => {
-                        self.visit_mem_use(r.mem);
+                match self.cx[node] {
+                    Node::Trunc(_, x) | Node::Sext(_, x) | Node::Zext(_, x) => {
+                        self.allow_inline = true;
+                        self.visit_node(x);
+                    }
+                    Node::Load(r) => {
+                        self.visit_node(r.mem);
 
                         self.allow_inline = true;
-                        self.visit_val_use(r.addr);
+                        self.visit_node(r.addr);
                     }
-                    Val::Trunc(_, x) | Val::Sext(_, x) | Val::Zext(_, x) => {
+                    Node::Store(r, x) => {
+                        self.visit_node(r.mem);
+
                         self.allow_inline = true;
-                        self.visit_val_use(x);
+                        self.visit_node(r.addr);
+                        self.visit_node(x);
                     }
-                    _ => v.walk(self),
+                    _ => node.walk(self),
                 }
                 self.allow_inline = allowed_inline;
 
-                // HACK(eddyb) override `allowed_inline` for values we want to
+                // HACK(eddyb) override `allowed_inline` for nodes we want to
                 // inline, but *only* if they're used exactly once.
-                let allowed_inline = match val {
-                    Val::Load(_) | Val::Trunc(..) | Val::Sext(..) | Val::Zext(..) => true,
+                let allowed_inline = match self.cx[node] {
+                    Node::Trunc(..) | Node::Sext(..) | Node::Zext(..) | Node::Load(_) => true,
                     _ => allowed_inline,
                 };
 
-                let inline = match val {
-                    Val::InReg(_) | Val::Const(_) => true,
+                let inline = match self.cx[node] {
+                    Node::InReg(_) | Node::Const(_) | Node::InMem => true,
 
                     // `-x` and `!x`.
-                    _ if val.as_unop(|c| self.cx[c].as_const()).is_some() => true,
+                    _ if self.cx[node].as_unop(|c| self.cx[c].as_const()).is_some() => true,
 
-                    _ => allowed_inline && self.data.use_counts.val[&v] == 1,
+                    _ => allowed_inline && self.data.use_counts[&node] == 1,
                 };
                 if !inline {
-                    let next = self.data.numbered_counts.val;
-                    self.data.numbered_counts.val += 1;
-                    self.data.locals.val.insert(v, next);
-                }
-            }
-            fn visit_mem_use(&mut self, m: Use<Mem>) {
-                if self.data.locals.mem.contains_key(&m) {
-                    return;
-                }
-
-                let mem = self.cx[m];
-
-                let allowed_inline = mem::replace(&mut self.allow_inline, false);
-                match mem {
-                    Mem::Store(r, x) => {
-                        self.visit_mem_use(r.mem);
-
-                        self.allow_inline = true;
-                        self.visit_val_use(r.addr);
-                        self.visit_val_use(x);
-                    }
-                    _ => m.walk(self),
-                }
-                self.allow_inline = allowed_inline;
-
-                let inline = match mem {
-                    Mem::In => true,
-                    _ => allowed_inline && self.data.use_counts.mem[&m] == 1,
-                };
-                if !inline {
-                    let next = self.data.numbered_counts.mem;
-                    self.data.numbered_counts.mem += 1;
-                    self.data.locals.mem.insert(m, next);
+                    let prefix = match self.cx[node].ty() {
+                        Type::Bits(_) => "v",
+                        Type::Mem => "m",
+                    };
+                    let numbered_count = self.data.numbered_counts.entry(prefix).or_default();
+                    let next = *numbered_count;
+                    *numbered_count += 1;
+                    self.data.locals.insert(node, (prefix, next));
                 }
             }
         }
@@ -1536,7 +1466,7 @@ impl Cx {
             cx: &'a Cx,
             data: &'a Data,
             fmt: &'a mut F,
-            seen: PerKind<HashSet<Use<Val>>, HashSet<Use<Mem>>>,
+            seen: HashSet<Use<Node>>,
             empty: bool,
         }
 
@@ -1555,11 +1485,11 @@ impl Cx {
                 self.cx
             }
 
-            fn visit_val_use(&mut self, v: Use<Val>) {
-                if !self.seen.val.insert(v) {
+            fn visit_node(&mut self, node: Use<Node>) {
+                if !self.seen.insert(node) {
                     return;
                 }
-                v.walk(self);
+                node.walk(self);
 
                 let mut names = 0;
                 macro_rules! write_name {
@@ -1572,47 +1502,22 @@ impl Cx {
                     }}
                 }
 
-                if let Some(regs) = self.data.val_to_state_regs.get(&v) {
+                if let Some(regs) = self.data.val_to_state_regs.get(&node) {
                     for r in regs {
                         write_name!("{:?}", r);
                     }
                 }
-                if self.data.locals.val.contains_key(&v) {
-                    if names < self.data.use_counts.val[&v] {
-                        write_name!("{:?}", v);
-                    }
-                }
-                if names > 0 {
-                    let _ = writeln!(self.fmt, "{:?};", self.cx[v]);
-                }
-            }
-            fn visit_mem_use(&mut self, m: Use<Mem>) {
-                if !self.seen.mem.insert(m) {
-                    return;
-                }
-                m.walk(self);
-
-                let mut names = 0;
-                macro_rules! write_name {
-                    ($fmt_str:literal $($rest:tt)*) => {{
-                        if names == 0 {
-                            self.start_def();
-                        }
-                        let _ = write!(self.fmt, concat!($fmt_str, " = ") $($rest)*);
-                        names += 1;
-                    }}
-                }
-
-                if Some(m) == self.data.state_mem {
+                if Some(node) == self.data.state_mem {
                     write_name!("m");
                 }
-                if self.data.locals.mem.contains_key(&m) {
-                    if names < self.data.use_counts.mem[&m] {
-                        write_name!("{:?}", m);
+
+                if self.data.locals.contains_key(&node) {
+                    if names < self.data.use_counts[&node] {
+                        write_name!("{:?}", node);
                     }
                 }
                 if names > 0 {
-                    let _ = writeln!(self.fmt, "{:?};", self.cx[m]);
+                    let _ = writeln!(self.fmt, "{:?};", self.cx[node]);
                 }
             }
         }
@@ -1638,14 +1543,14 @@ impl Cx {
                     if t == e {
                         t
                     } else {
-                        use_counter.visit_mem_use(t);
-                        use_counter.visit_mem_use(e);
+                        use_counter.visit_node(t);
+                        use_counter.visit_node(e);
                         default
                     }
                 });
             if m != default {
                 use_counter.data.state_mem = Some(m);
-                use_counter.visit_mem_use(m);
+                use_counter.visit_node(m);
             }
         }
 
@@ -1656,8 +1561,8 @@ impl Cx {
                     if t == e {
                         t
                     } else {
-                        use_counter.visit_val_use(t);
-                        use_counter.visit_val_use(e);
+                        use_counter.visit_node(t);
+                        use_counter.visit_node(e);
                         default
                     }
                 });
@@ -1668,7 +1573,7 @@ impl Cx {
             // HACK(eddyb) try to guess the register name.
             // Ideally this would be provided by the `Isa`.
             let r = match self[default] {
-                Val::InReg(r) if i == r.index => r,
+                Node::InReg(r) if i == r.index => r,
                 default => panic!("register #{} has non-register default {:?}", i, default),
             };
             use_counter
@@ -1677,7 +1582,7 @@ impl Cx {
                 .entry(v)
                 .or_default()
                 .push(r);
-            use_counter.visit_val_use(v);
+            use_counter.visit_node(v);
         }
         edge_states_and_values
             .map(|(_, value), _| value)
@@ -1746,7 +1651,7 @@ impl Cx {
                                             // HACK(eddyb) try to guess the register name.
                                             // Ideally this would be provided by the `Isa`.
                                             let r = match self.cx[default] {
-                                                Val::InReg(r) if i == r.index => r,
+                                                Node::InReg(r) if i == r.index => r,
                                                 default => panic!(
                                                     "register #{} has non-register default {:?}",
                                                     i, default
