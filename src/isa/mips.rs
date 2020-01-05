@@ -36,11 +36,11 @@ impl Mips32 {
 
 macro_rules! reg_names {
     ($($name:ident)*) => {
-        ([$(stringify!($name)),*], [$(concat!(stringify!($name), ".upper")),*])
+        [$(stringify!($name)),*]
     }
 }
 
-const GPR_NAMES: ([&str; 32], [&str; 32]) = reg_names![
+const GPR_NAMES: [&str; 32] = reg_names![
     zero__THIS_SHOULD_NEVER_BE_USED
     at
     rv0 rv1
@@ -54,8 +54,6 @@ const GPR_NAMES: ([&str; 32], [&str; 32]) = reg_names![
     fp
     ra
 ];
-
-const MUL_DIV_REG_NAMES: ([&str; 2], [&str; 2]) = reg_names![lo hi];
 
 enum Reg {
     Lo = 32,
@@ -87,16 +85,22 @@ impl Isa for Mips32 {
     }
 
     fn regs(&self, cx: &Cx) -> Vec<crate::ir::Reg> {
-        let lower = (&GPR_NAMES.0, &MUL_DIV_REG_NAMES.0);
-        let upper = (&GPR_NAMES.1, &MUL_DIV_REG_NAMES.1);
-        [lower, upper]
+        [None, Some("upper")]
             .iter()
-            .flat_map(|&(gpr_names, mul_div_reg_names)| gpr_names.iter().chain(mul_div_reg_names))
+            .flat_map(|&suffix| {
+                GPR_NAMES
+                    .iter()
+                    .chain(&["lo", "hi"])
+                    .map(move |&name| match suffix {
+                        None => cx.a(name),
+                        Some(suffix) => cx.a(&format!("{}.{}", name, suffix)[..]),
+                    })
+            })
             .enumerate()
-            .map(move |(index, &name)| crate::ir::Reg {
+            .map(move |(index, name)| crate::ir::Reg {
                 index,
                 size: B32,
-                name: cx.a(name),
+                name,
             })
             .collect()
     }
@@ -524,7 +528,7 @@ impl Isa for Mips32 {
                             call: format!(
                                 "CACHE(op={}, base={}, imm={:?})",
                                 field(16, 5),
-                                GPR_NAMES.0[field(21, 5) as usize],
+                                GPR_NAMES[field(21, 5) as usize],
                                 imm,
                             ),
                             next_pc: cx.a(*pc),
@@ -543,7 +547,7 @@ impl Isa for Mips32 {
                                 if (op & 8) == 0 { 'L' } else { 'S' },
                                 if (op & 4) == 0 { 'W' } else { 'D' },
                                 rd,
-                                GPR_NAMES.0[field(21, 5) as usize],
+                                GPR_NAMES[field(21, 5) as usize],
                                 imm
                             ),
                             next_pc: cx.a(*pc),
