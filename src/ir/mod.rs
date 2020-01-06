@@ -928,7 +928,7 @@ impl Visit for Node {
 impl INode {
     pub fn subst(self, cx: &Cx, base: &State) -> Self {
         cx.a(match cx[self] {
-            Node::InReg(r) => return base.regs[cx[r].index],
+            Node::InReg(r) => return base.regs[cx[r].index].unwrap_or(self),
 
             Node::Const(_) => return self,
 
@@ -939,7 +939,7 @@ impl INode {
 
             Node::Load(r) => Node::Load(r.subst(cx, base)),
 
-            Node::InMem => return base.mem,
+            Node::InMem => return base.mem.unwrap_or(self),
 
             Node::Store(r, x) => Node::Store(r.subst(cx, base), x.subst(cx, base)),
         })
@@ -982,22 +982,40 @@ impl Visit for Effect {
 
 #[derive(Clone)]
 pub struct State {
-    pub mem: INode,
+    pub mem: Option<INode>,
 
     // FIXME(eddyb) stop using indices for registers.
-    pub regs: Vec<INode>,
+    pub regs: Vec<Option<INode>>,
     pub reg_defs: Vec<IReg>,
+}
+
+impl State {
+    pub fn get_mem(&self, cx: &Cx) -> INode {
+        self.mem.unwrap_or_else(|| cx.a(Node::InMem))
+    }
+
+    pub fn set_mem(&mut self, cx: &Cx, m: INode) {
+        self.mem = if cx[m] != Node::InMem { Some(m) } else { None };
+    }
+
+    pub fn get(&self, cx: &Cx, r: IReg) -> INode {
+        self.regs[cx[r].index].unwrap_or_else(|| cx.a(Node::InReg(r)))
+    }
+
+    pub fn set(&mut self, cx: &Cx, r: IReg, v: INode) {
+        self.regs[cx[r].index] = if cx[v] != Node::InReg(r) {
+            Some(v)
+        } else {
+            None
+        };
+    }
 }
 
 impl Visit for State {
     fn walk(&self, visitor: &mut impl Visitor) {
-        if visitor.cx()[self.mem] != Node::InMem {
-            visitor.visit_node(self.mem);
-        }
-        for (i, &v) in self.regs.iter().enumerate() {
-            if visitor.cx()[v] != Node::InReg(self.reg_defs[i]) {
-                visitor.visit_node(v);
-            }
+        self.mem.visit(visitor);
+        for &v in &self.regs {
+            v.visit(visitor);
         }
     }
 }
@@ -1294,21 +1312,10 @@ impl Cx {
 
             let mem_and_regs = iter::once(None).chain((0..reg_defs.len()).map(Some));
             for maybe_reg in mem_and_regs {
-                let default = match maybe_reg {
-                    None => Node::InMem,
-                    Some(i) => Node::InReg(reg_defs[i]),
-                };
                 let node = edge_states
                     .map(|state, _| match maybe_reg {
                         None => state.mem,
                         Some(i) => state.regs[i],
-                    })
-                    .map(|node, _| {
-                        if self[node] != default {
-                            Some(node)
-                        } else {
-                            None
-                        }
                     })
                     .merge(|t, e| {
                         if t == e {
@@ -1395,14 +1402,17 @@ impl Cx {
                                     assert_eq!(state.is_some(), other_state.is_some());
                                     if let (Some(state), Some(other_state)) = (state, other_state) {
                                         let m = state.mem;
-                                        if self.cx[m] != Node::InMem && m != other_state.mem {
-                                            writeln!(f, "        m = {:?};", m)?;
+                                        if m != other_state.mem {
+                                            if let Some(m) = m {
+                                                writeln!(f, "        m = {:?};", m)?;
+                                            }
                                         }
                                         for (i, &v) in state.regs.iter().enumerate() {
                                             let r = state.reg_defs[i];
-                                            if self.cx[v] != Node::InReg(r) && v != other_state.regs[i]
-                                            {
-                                                writeln!(f, "        {:?} = {:?};", r, v)?;
+                                            if v != other_state.regs[i] {
+                                                if let Some(v) = v {
+                                                    writeln!(f, "        {:?} = {:?};", r, v)?;
+                                                }
                                             }
                                         }
                                     }

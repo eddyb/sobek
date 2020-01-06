@@ -154,7 +154,7 @@ impl Isa for I8080 {
                 let addr = $addr;
                 assert_eq!(cx[addr].ty(cx), Type::Bits(B16));
                 MemRef {
-                    mem: state.mem,
+                    mem: state.get_mem(cx),
                     addr,
                     size: MemSize::$sz,
                 }
@@ -169,31 +169,38 @@ impl Isa for I8080 {
                 let value = $value;
                 let size = cx[value].ty(cx).bit_size().unwrap();
                 let sp = node!(int_sub(
-                    state.regs[Reg::SP as usize],
+                    state.get(cx, state.reg_defs[Reg::SP as usize]),
                     cx.a(Const::new(B16, (size.bits() / 8) as u64))
                 ));
-                state.regs[Reg::SP as usize] = sp;
-                state.mem = node!(Store(
-                    match size {
-                        B8 => mem_ref!(sp),
-                        B16 => mem_ref!(sp, M16),
-                        _ => unreachable!(),
-                    },
-                    value
-                ));
+                state.set(cx, state.reg_defs[Reg::SP as usize], sp);
+                state.set_mem(
+                    cx,
+                    node!(Store(
+                        match size {
+                            B8 => mem_ref!(sp),
+                            B16 => mem_ref!(sp, M16),
+                            _ => unreachable!(),
+                        },
+                        value
+                    )),
+                );
             }};
         }
 
         macro_rules! pop {
             ($sz:ident) => {{
-                let sp = state.regs[Reg::SP as usize];
+                let sp = state.get(cx, state.reg_defs[Reg::SP as usize]);
                 let value = node!(Load(mem_ref!(sp, $sz)));
-                state.regs[Reg::SP as usize] = node!(Int(
-                    IntOp::Add,
-                    B16,
-                    sp,
-                    cx.a(Const::new(B16, (MemSize::$sz.bits() / 8) as u64))
-                ));
+                state.set(
+                    cx,
+                    state.reg_defs[Reg::SP as usize],
+                    node!(Int(
+                        IntOp::Add,
+                        B16,
+                        sp,
+                        cx.a(Const::new(B16, (MemSize::$sz.bits() / 8) as u64))
+                    )),
+                );
                 value
             }};
         }
@@ -286,18 +293,22 @@ impl Isa for I8080 {
         macro_rules! get {
             ($operand:expr) => {
                 match $operand {
-                    Operand::RegA => state.regs[Reg::A as usize],
-                    Operand::RegLo(r) => node!(Trunc(B8, state.regs[r as usize])),
+                    Operand::RegA => state.get(cx, state.reg_defs[Reg::A as usize]),
+                    Operand::RegLo(r) => {
+                        node!(Trunc(B8, state.get(cx, state.reg_defs[r as usize])))
+                    }
                     Operand::RegHi(r) => node!(Trunc(
                         B8,
                         node!(Int(
                             IntOp::ShrU,
                             B16,
-                            state.regs[r as usize],
+                            state.get(cx, state.reg_defs[r as usize]),
                             cx.a(Const::new(B8, 8))
                         ))
                     )),
-                    Operand::Mem => node!(Load(mem_ref!(state.regs[Reg::HL as usize]))),
+                    Operand::Mem => node!(Load(mem_ref!(
+                        state.get(cx, state.reg_defs[Reg::HL as usize])
+                    ))),
                 }
             };
             () => {
@@ -308,28 +319,32 @@ impl Isa for I8080 {
             ($operand:expr, $val:expr) => {{
                 let val = $val;
                 match $operand {
-                    Operand::RegA => state.regs[Reg::A as usize] = val,
-                    Operand::RegLo(r) => {
-                        state.regs[r as usize] = node!(Int(
+                    Operand::RegA => state.set(cx, state.reg_defs[Reg::A as usize], val),
+                    Operand::RegLo(r) => state.set(
+                        cx,
+                        state.reg_defs[r as usize],
+                        node!(Int(
                             IntOp::Or,
                             B16,
                             node!(Int(
                                 IntOp::And,
                                 B16,
-                                state.regs[r as usize],
+                                state.get(cx, state.reg_defs[r as usize]),
                                 cx.a(Const::new(B16, 0xff00))
                             )),
                             node!(Zext(B16, val))
-                        ))
-                    }
-                    Operand::RegHi(r) => {
-                        state.regs[r as usize] = node!(Int(
+                        )),
+                    ),
+                    Operand::RegHi(r) => state.set(
+                        cx,
+                        state.reg_defs[r as usize],
+                        node!(Int(
                             IntOp::Or,
                             B16,
                             node!(Int(
                                 IntOp::And,
                                 B16,
-                                state.regs[r as usize],
+                                state.get(cx, state.reg_defs[r as usize]),
                                 cx.a(Const::new(B16, 0x00ff))
                             )),
                             node!(Int(
@@ -338,11 +353,15 @@ impl Isa for I8080 {
                                 node!(Zext(B16, val)),
                                 cx.a(Const::new(B8, 8))
                             ))
-                        ))
-                    }
-                    Operand::Mem => {
-                        state.mem = node!(Store(mem_ref!(state.regs[Reg::HL as usize]), val))
-                    }
+                        )),
+                    ),
+                    Operand::Mem => state.set_mem(
+                        cx,
+                        node!(Store(
+                            mem_ref!(state.get(cx, state.reg_defs[Reg::HL as usize])),
+                            val
+                        )),
+                    ),
                 }
             }};
             ($val:expr) => {
@@ -365,7 +384,10 @@ impl Isa for I8080 {
             match op {
                 0x08 => {
                     let m = mem_ref!(cx.a(imm!(16)), M16);
-                    state.mem = node!(Store(m, state.regs[Reg::SP as usize]));
+                    state.set_mem(
+                        cx,
+                        node!(Store(m, state.get(cx, state.reg_defs[Reg::SP as usize]))),
+                    );
                     return Ok(state);
                 }
                 0x18 => return jump!(relative_target!()),
@@ -376,17 +398,17 @@ impl Isa for I8080 {
                 }
                 _ if (op & 0xe7) == 0x22 => {
                     if (op & 0x0f) == 0x02 {
-                        set!(Operand::Mem, state.regs[Reg::A as usize]);
+                        set!(Operand::Mem, state.get(cx, state.reg_defs[Reg::A as usize]));
                     } else {
-                        state.regs[Reg::A as usize] = get!(Operand::Mem);
+                        state.set(cx, state.reg_defs[Reg::A as usize], get!(Operand::Mem));
                     }
-                    let hl = state.regs[Reg::HL as usize];
+                    let hl = state.get(cx, state.reg_defs[Reg::HL as usize]);
                     let hl = if (op & 0xf0) == 0x20 {
                         node!(Int(IntOp::Add, B16, hl, cx.a(Const::new(B16, 1))))
                     } else {
                         node!(int_sub(hl, cx.a(Const::new(B16, 1))))
                     };
-                    state.regs[Reg::HL as usize] = hl;
+                    state.set(cx, state.reg_defs[Reg::HL as usize], hl);
                     return Ok(state);
                 }
                 _ if (op & 0xed) == 0xe0 || (op & 0xef) == 0xea => {
@@ -406,9 +428,12 @@ impl Isa for I8080 {
                     };
                     let m = mem_ref!(addr);
                     if (op & 0xf0) == 0xe0 {
-                        state.mem = node!(Store(m, state.regs[Reg::A as usize]));
+                        state.set_mem(
+                            cx,
+                            node!(Store(m, state.get(cx, state.reg_defs[Reg::A as usize]))),
+                        );
                     } else {
-                        state.regs[Reg::A as usize] = node!(Load(m));
+                        state.set(cx, state.reg_defs[Reg::A as usize], node!(Load(m)));
                     }
                     return Ok(state);
                 }
@@ -455,19 +480,31 @@ impl Isa for I8080 {
                             // FIXME(eddyb) set the flags.
                         }
                         0x40..=0x78 => {
-                            state.regs[Reg::F_Z as usize] = node!(Int(
-                                IntOp::Eq,
-                                B8,
+                            state.set(
+                                cx,
+                                state.reg_defs[Reg::F_Z as usize],
                                 node!(Int(
-                                    IntOp::And,
+                                    IntOp::Eq,
                                     B8,
-                                    val,
-                                    cx.a(Const::new(B8, bit_mask as u64))
+                                    node!(Int(
+                                        IntOp::And,
+                                        B8,
+                                        val,
+                                        cx.a(Const::new(B8, bit_mask as u64))
+                                    )),
+                                    cx.a(Const::new(B8, 0))
                                 )),
-                                cx.a(Const::new(B8, 0))
-                            ));
-                            state.regs[Reg::F_N as usize] = cx.a(Const::new(B1, 0));
-                            state.regs[Reg::F_H as usize] = cx.a(Const::new(B1, 1));
+                            );
+                            state.set(
+                                cx,
+                                state.reg_defs[Reg::F_N as usize],
+                                cx.a(Const::new(B1, 0)),
+                            );
+                            state.set(
+                                cx,
+                                state.reg_defs[Reg::F_H as usize],
+                                cx.a(Const::new(B1, 1)),
+                            );
 
                             return Ok(state);
                         }
@@ -489,7 +526,11 @@ impl Isa for I8080 {
                     return Ok(state);
                 }
                 0xd9 => {
-                    state.regs[Reg::IE as usize] = cx.a(Const::new(B1, 1));
+                    state.set(
+                        cx,
+                        state.reg_defs[Reg::IE as usize],
+                        cx.a(Const::new(B1, 1)),
+                    );
                     return jump!(pop!(M16));
                 }
                 0x10 | 0xe8 | 0xf8 => {
@@ -504,7 +545,7 @@ impl Isa for I8080 {
         match op {
             _ if (op & 0xc5) == 0x01 => {
                 let mut i = Reg::BC as usize + (op >> 4) as usize;
-                let mut val = state.regs[i];
+                let mut val = state.get(cx, state.reg_defs[i]);
                 val = match op & 0x0f {
                     0x01 => cx.a(imm!(16)),
                     0x03 => node!(Int(IntOp::Add, B16, val, cx.a(Const::new(B16, 1)))),
@@ -512,20 +553,28 @@ impl Isa for I8080 {
                         // HACK(eddyb) this allows reusing the rest of the code.
                         i = Reg::HL as usize;
 
-                        node!(Int(IntOp::Add, B16, state.regs[Reg::HL as usize], val))
+                        node!(Int(
+                            IntOp::Add,
+                            B16,
+                            state.get(cx, state.reg_defs[Reg::HL as usize]),
+                            val
+                        ))
                     }
                     0x0b => node!(int_sub(val, cx.a(Const::new(B16, 1)))),
                     _ => unreachable!(),
                 };
-                state.regs[i] = val;
+                state.set(cx, state.reg_defs[i], val);
             }
             _ if (op & 0xe7) == 0x02 => {
-                let addr = state.regs[Reg::BC as usize + (op >> 4) as usize];
+                let addr = state.get(cx, state.reg_defs[Reg::BC as usize + (op >> 4) as usize]);
                 let m = mem_ref!(addr);
                 if (op & 0x0f) == 0x02 {
-                    state.mem = node!(Store(m, state.regs[Reg::A as usize]));
+                    state.set_mem(
+                        cx,
+                        node!(Store(m, state.get(cx, state.reg_defs[Reg::A as usize]))),
+                    );
                 } else {
-                    state.regs[Reg::A as usize] = node!(Load(m));
+                    state.set(cx, state.reg_defs[Reg::A as usize], node!(Load(m)));
                 }
                 return Ok(state);
             }
@@ -545,42 +594,80 @@ impl Isa for I8080 {
             }
             _ if (op & 0xc0) == 0x80 || (op & 0xc7) == 0xc6 => {
                 let operand = get_src!();
-                state.regs[Reg::A as usize] = match op & 0xb8 {
-                    0x80 => {
-                        node!(Int(IntOp::Add, B8, state.regs[Reg::A as usize], operand))
-                        // FIXME(eddyb) set the flags.
-                    }
-                    0x88 => {
-                        node!(Int(
-                            IntOp::Add,
+                state.set(
+                    cx,
+                    state.reg_defs[Reg::A as usize],
+                    match op & 0xb8 {
+                        0x80 => {
+                            node!(Int(
+                                IntOp::Add,
+                                B8,
+                                state.get(cx, state.reg_defs[Reg::A as usize]),
+                                operand
+                            ))
+                            // FIXME(eddyb) set the flags.
+                        }
+                        0x88 => {
+                            node!(Int(
+                                IntOp::Add,
+                                B8,
+                                node!(Int(
+                                    IntOp::Add,
+                                    B8,
+                                    state.get(cx, state.reg_defs[Reg::A as usize]),
+                                    operand
+                                )),
+                                node!(Zext(B8, state.get(cx, state.reg_defs[Reg::F_C as usize])))
+                            ))
+                            // FIXME(eddyb) set the flags.
+                        }
+                        0x90 => {
+                            node!(int_sub(
+                                state.get(cx, state.reg_defs[Reg::A as usize]),
+                                operand
+                            ))
+                            // FIXME(eddyb) set the flags.
+                        }
+                        0x98 => {
+                            node!(int_sub(
+                                node!(int_sub(
+                                    state.get(cx, state.reg_defs[Reg::A as usize]),
+                                    operand
+                                )),
+                                node!(Zext(B8, state.get(cx, state.reg_defs[Reg::F_C as usize])))
+                            ))
+                            // FIXME(eddyb) set the flags.
+                        }
+                        0xa0 => node!(Int(
+                            IntOp::And,
                             B8,
-                            node!(Int(IntOp::Add, B8, state.regs[Reg::A as usize], operand)),
-                            node!(Zext(B8, state.regs[Reg::F_C as usize]))
-                        ))
-                        // FIXME(eddyb) set the flags.
-                    }
-                    0x90 => {
-                        node!(int_sub(state.regs[Reg::A as usize], operand))
-                        // FIXME(eddyb) set the flags.
-                    }
-                    0x98 => {
-                        node!(int_sub(
-                            node!(int_sub(state.regs[Reg::A as usize], operand)),
-                            node!(Zext(B8, state.regs[Reg::F_C as usize]))
-                        ))
-                        // FIXME(eddyb) set the flags.
-                    }
-                    0xa0 => node!(Int(IntOp::And, B8, state.regs[Reg::A as usize], operand)),
-                    0xa8 => node!(Int(IntOp::Xor, B8, state.regs[Reg::A as usize], operand)),
-                    0xb0 => node!(Int(IntOp::Or, B8, state.regs[Reg::A as usize], operand)),
-                    0xb8 => {
-                        // TODO(eddyb) figure out the subtraction direction.
-                        node!(int_sub(operand, state.regs[Reg::A as usize]));
-                        // FIXME(eddyb) set the flags.
-                        return Ok(state);
-                    }
-                    _ => unreachable!(),
-                };
+                            state.get(cx, state.reg_defs[Reg::A as usize]),
+                            operand
+                        )),
+                        0xa8 => node!(Int(
+                            IntOp::Xor,
+                            B8,
+                            state.get(cx, state.reg_defs[Reg::A as usize]),
+                            operand
+                        )),
+                        0xb0 => node!(Int(
+                            IntOp::Or,
+                            B8,
+                            state.get(cx, state.reg_defs[Reg::A as usize]),
+                            operand
+                        )),
+                        0xb8 => {
+                            // TODO(eddyb) figure out the subtraction direction.
+                            node!(int_sub(
+                                operand,
+                                state.get(cx, state.reg_defs[Reg::A as usize])
+                            ));
+                            // FIXME(eddyb) set the flags.
+                            return Ok(state);
+                        }
+                        _ => unreachable!(),
+                    },
+                );
             }
             _ if (op & 0xc7) == 0xc0 => {
                 return conditional!(Effect::Jump(pop!(M16)));
@@ -592,24 +679,29 @@ impl Isa for I8080 {
                 let flags = pop!(M8);
                 for (i, &flag) in flavor.flags().iter().enumerate() {
                     if let Ok(reg) = flag {
-                        state.regs[reg as usize] = node!(Trunc(
-                            B1,
-                            node!(Int(IntOp::ShrU, B8, flags, cx.a(Const::new(B8, i as u64))))
-                        ));
+                        state.set(
+                            cx,
+                            state.reg_defs[reg as usize],
+                            node!(Trunc(
+                                B1,
+                                node!(Int(IntOp::ShrU, B8, flags, cx.a(Const::new(B8, i as u64))))
+                            )),
+                        );
                     }
                 }
 
-                state.regs[Reg::A as usize] = pop!(M8);
+                let a = pop!(M8);
+                state.set(cx, state.reg_defs[Reg::A as usize], a);
             }
             0xf5 => {
-                push!(state.regs[Reg::A as usize]);
+                push!(state.get(cx, state.reg_defs[Reg::A as usize]));
 
                 push!(flavor
                     .flags()
                     .iter()
                     .map(|&flag| {
                         match flag {
-                            Ok(reg) => state.regs[reg as usize],
+                            Ok(reg) => state.get(cx, state.reg_defs[reg as usize]),
                             Err(c) => cx.a(Const::new(B1, c as u64)),
                         }
                     })
@@ -633,9 +725,10 @@ impl Isa for I8080 {
                 let i = (op >> 4) & 0x3;
                 let i = Reg::BC as usize + (i as usize);
                 if (op & 4) == 0 {
-                    state.regs[i] = pop!(M16);
+                    let v = pop!(M16);
+                    state.set(cx, state.reg_defs[i], v);
                 } else {
-                    push!(state.regs[i]);
+                    push!(state.get(cx, state.reg_defs[i]));
                 }
             }
             _ if (op & 0xc7) == 0xc2 => {
@@ -654,28 +747,50 @@ impl Isa for I8080 {
                 return jump!(cx.a(Const::new(B16, ((i as u16) * 8) as u64)));
             }
             _ if op & 0xf7 == 0xf3 => {
-                state.regs[Reg::IE as usize] = cx.a(Const::new(B1, ((op >> 3) & 1) as u64));
+                state.set(
+                    cx,
+                    state.reg_defs[Reg::IE as usize],
+                    cx.a(Const::new(B1, ((op >> 3) & 1) as u64)),
+                );
             }
 
             0x00 => {}
             0x07 => {
-                state.regs[Reg::A as usize] = node!(bit_rol(
-                    state.regs[Reg::A as usize],
-                    cx.a(Const::new(B8, 1))
-                ));
+                state.set(
+                    cx,
+                    state.reg_defs[Reg::A as usize],
+                    node!(bit_rol(
+                        state.get(cx, state.reg_defs[Reg::A as usize]),
+                        cx.a(Const::new(B8, 1))
+                    )),
+                );
                 // FIXME(eddyb) set the flags.
             }
             0x27 => {
                 // FIXME(eddyb) actually implement.
             }
             0x2f => {
-                state.regs[Reg::A as usize] = node!(bit_not(state.regs[Reg::A as usize]));
+                state.set(
+                    cx,
+                    state.reg_defs[Reg::A as usize],
+                    node!(bit_not(state.get(cx, state.reg_defs[Reg::A as usize]))),
+                );
             }
             0x32 => {
-                state.mem = node!(Store(mem_ref!(cx.a(imm!(16))), state.regs[Reg::A as usize]));
+                state.set_mem(
+                    cx,
+                    node!(Store(
+                        mem_ref!(cx.a(imm!(16))),
+                        state.get(cx, state.reg_defs[Reg::A as usize])
+                    )),
+                );
             }
             0x3a => {
-                state.regs[Reg::A as usize] = node!(Load(mem_ref!(cx.a(imm!(16)))));
+                state.set(
+                    cx,
+                    state.reg_defs[Reg::A as usize],
+                    node!(Load(mem_ref!(cx.a(imm!(16))))),
+                );
             }
             0xc3 => return jump!(cx.a(imm!(16))),
             0xc9 => return jump!(pop!(M16)),
@@ -684,7 +799,7 @@ impl Isa for I8080 {
                 push!(cx.a(*pc));
                 return jump!(target);
             }
-            0xe9 => return jump!(state.regs[Reg::HL as usize]),
+            0xe9 => return jump!(state.get(cx, state.reg_defs[Reg::HL as usize])),
             0xeb => {
                 state.regs.swap(Reg::DE as usize, Reg::HL as usize);
             }

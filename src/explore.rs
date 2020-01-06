@@ -89,8 +89,8 @@ impl INode {
         size: MemSize,
     ) -> INode {
         match cx[self] {
-            Node::InMem => match base {
-                Some(base) => base.mem.subst_reduce_load(cx, rom, None, addr, size),
+            Node::InMem => match base.and_then(|base| base.mem) {
+                Some(m) => m.subst_reduce_load(cx, rom, None, addr, size),
                 None => {
                     // HACK(eddyb) assume it's from the ROM, if in range of it.
                     if let Some(addr) = cx[addr].as_const() {
@@ -125,9 +125,9 @@ impl INode {
     fn subst_reduce(self, cx: &Cx, rom: &dyn Rom, base: Option<&State>) -> Self {
         cx.a(match cx[self] {
             Node::InReg(r) => {
-                return base.map_or(self, |base| {
-                    base.regs[cx[r].index].subst_reduce(cx, rom, None)
-                })
+                return base
+                    .and_then(|base| base.regs[cx[r].index])
+                    .map_or(self, |v| v.subst_reduce(cx, rom, None))
             }
 
             Node::Const(_) => return self,
@@ -146,7 +146,11 @@ impl INode {
                 return r.mem.subst_reduce_load(cx, rom, base, addr, r.size);
             }
 
-            Node::InMem => return base.map_or(self, |base| base.mem.subst_reduce(cx, rom, None)),
+            Node::InMem => {
+                return base
+                    .and_then(|base| base.mem)
+                    .map_or(self, |m| m.subst_reduce(cx, rom, None))
+            }
 
             Node::Store(r, x) => Node::Store(
                 MemRef {
@@ -252,11 +256,8 @@ impl<'a> Explorer<'a> {
                 .map(|r| self.cx.a(r))
                 .collect();
             let mut state = State {
-                mem: self.cx.a(Node::InMem),
-                regs: reg_defs
-                    .iter()
-                    .map(|&r| self.cx.a(Node::InReg(r)))
-                    .collect(),
+                mem: None,
+                regs: reg_defs.iter().map(|_| None).collect(),
                 reg_defs,
             };
             let mut pc = Const::new(self.platform.isa().addr_size(), bb.entry_pc);

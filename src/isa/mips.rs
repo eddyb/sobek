@@ -68,13 +68,13 @@ impl State {
         if r == 0 || r == NUM_REGS {
             cx.a(Const::new(B32, 0))
         } else {
-            self.regs[r]
+            self.get(cx, self.reg_defs[r])
         }
     }
 
-    fn set_mips32(&mut self, r: usize, v: INode) {
+    fn set_mips32(&mut self, cx: &Cx, r: usize, v: INode) {
         if r != 0 && r != NUM_REGS {
-            self.regs[r] = v;
+            self.set(cx, self.reg_defs[r], v);
         }
     }
 }
@@ -146,7 +146,7 @@ impl Isa for Mips32 {
 
         macro_rules! link {
             ($r:expr) => {
-                state.set_mips32($r, cx.a(add4(*pc)))
+                state.set_mips32(cx, $r, cx.a(add4(*pc)))
             };
             () => {
                 link!(31)
@@ -277,8 +277,9 @@ impl Isa for Mips32 {
                 let val = $val;
                 match size {
                     B64 => {
-                        state.set_mips32(i, node!(Trunc(B32, val)));
+                        state.set_mips32(cx, i, node!(Trunc(B32, val)));
                         state.set_mips32(
+                            cx,
                             NUM_REGS + i,
                             node!(Trunc(
                                 B32,
@@ -286,7 +287,7 @@ impl Isa for Mips32 {
                             )),
                         );
                     }
-                    B32 => state.set_mips32(i, val),
+                    B32 => state.set_mips32(cx, i, val),
                     _ => unreachable!(),
                 }
             }};
@@ -466,7 +467,7 @@ impl Isa for Mips32 {
             macro_rules! mem_ref {
                 ($sz:ident) => {
                     MemRef {
-                        mem: state.mem,
+                        mem: state.get_mem(cx),
                         addr: node!(Int(IntOp::Add, B32, rs, cx.a(imm))),
                         size: MemSize::$sz,
                     }
@@ -506,19 +507,19 @@ impl Isa for Mips32 {
                     if cx[v].ty(cx) == Type::Bits(B1) {
                         v = node!(Zext(B32, v));
                     }
-                    state.set_mips32(rd, v);
+                    state.set_mips32(cx, rd, v);
                 }
-                15 => state.set_mips32(rd, cx.a(Const::new(B32, (imm.as_u32() << 16) as u64))),
+                15 => state.set_mips32(cx, rd, cx.a(Const::new(B32, (imm.as_u32() << 16) as u64))),
 
-                32 => state.set_mips32(rd, node!(Sext(B32, node!(Load(mem_ref!(M8)))))),
-                33 => state.set_mips32(rd, node!(Sext(B32, node!(Load(mem_ref!(M16)))))),
-                35 => state.set_mips32(rd, node!(Load(mem_ref!(M32)))),
-                36 => state.set_mips32(rd, node!(Zext(B32, node!(Load(mem_ref!(M8)))))),
-                37 => state.set_mips32(rd, node!(Zext(B32, node!(Load(mem_ref!(M16)))))),
+                32 => state.set_mips32(cx, rd, node!(Sext(B32, node!(Load(mem_ref!(M8)))))),
+                33 => state.set_mips32(cx, rd, node!(Sext(B32, node!(Load(mem_ref!(M16)))))),
+                35 => state.set_mips32(cx, rd, node!(Load(mem_ref!(M32)))),
+                36 => state.set_mips32(cx, rd, node!(Zext(B32, node!(Load(mem_ref!(M8)))))),
+                37 => state.set_mips32(cx, rd, node!(Zext(B32, node!(Load(mem_ref!(M16)))))),
 
-                40 => state.mem = node!(Store(mem_ref!(M8), node!(Trunc(B8, rt)))),
-                41 => state.mem = node!(Store(mem_ref!(M16), node!(Trunc(B16, rt)))),
-                43 => state.mem = node!(Store(mem_ref!(M32), rt)),
+                40 => state.set_mem(cx, node!(Store(mem_ref!(M8), node!(Trunc(B8, rt))))),
+                41 => state.set_mem(cx, node!(Store(mem_ref!(M16), node!(Trunc(B16, rt))))),
+                43 => state.set_mem(cx, node!(Store(mem_ref!(M32), rt))),
 
                 47 => {
                     // FIXME(eddyb) use the result of rs+imm as an argument.
@@ -556,7 +557,7 @@ impl Isa for Mips32 {
                 }
 
                 55 => set_reg_maybe64!(rd, node!(Load(mem_ref!(M64)))),
-                63 => state.mem = node!(Store(mem_ref!(M64), rt)),
+                63 => state.set_mem(cx, node!(Store(mem_ref!(M64), rt))),
 
                 _ => error!("unknown opcode 0x{:x} ({0})", op),
             }
