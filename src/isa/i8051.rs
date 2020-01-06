@@ -535,14 +535,19 @@ impl Isa for I8051 {
             match op {
                 0x00 => {}
                 0x02 => return jump!(cx.a(imm!(16))),
-                0x03 => state.set(
-                    cx,
-                    self.regs[Sfr::A],
-                    node!(bit_ror(
-                        state.get(cx, self.regs[Sfr::A]),
-                        cx.a(Const::new(B8, 1))
-                    )),
-                ),
+                0x03 | 0x13 => {
+                    state.set(
+                        cx,
+                        self.regs[Sfr::A],
+                        node!(bit_ror(
+                            state.get(cx, self.regs[Sfr::A]),
+                            cx.a(Const::new(B8, 1))
+                        )),
+                    );
+                    if op == 0x13 {
+                        // FIXME(eddyb) set (and read) the flags.
+                    }
+                }
                 0x10 | 0x20 | 0x30 => {
                     let bit = bit_addr!();
                     let val = get!();
@@ -565,14 +570,19 @@ impl Isa for I8051 {
                     }
                     return jump!(pop!(M16));
                 }
-                0x23 => state.set(
-                    cx,
-                    self.regs[Sfr::A],
-                    node!(bit_rol(
-                        state.get(cx, self.regs[Sfr::A]),
-                        cx.a(Const::new(B8, 1))
-                    )),
-                ),
+                0x23 | 0x33 => {
+                    state.set(
+                        cx,
+                        self.regs[Sfr::A],
+                        node!(bit_rol(
+                            state.get(cx, self.regs[Sfr::A]),
+                            cx.a(Const::new(B8, 1))
+                        )),
+                    );
+                    if op == 0x33 {
+                        // FIXME(eddyb) set (and read) the flags.
+                    }
+                }
                 0x40 | 0x50 => {
                     return branch!(node!(Int(IntOp::Eq, B1, state.get(cx, self.regs.psw_c), cx.a(Const::new(B1, 0)))) => op == 0x50);
                 }
@@ -683,6 +693,7 @@ impl Isa for I8051 {
                         cx.a(Const::new(B8, (!(1u8 << bit)) as u64))
                     )));
                 }
+                0xc3 | 0xd3 => state.set(cx, self.regs.psw_c, cx.a(Const::from(op == 0xd3))),
                 0xd0 => set!(direct!(), pop!(M8)),
                 0xd2 => {
                     let bit = bit_addr!();
