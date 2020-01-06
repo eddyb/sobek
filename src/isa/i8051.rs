@@ -84,8 +84,7 @@ impl Index<Sfr> for Regs {
 }
 
 impl Isa for I8051 {
-    // FIXME(eddyb) add proper support for a Harvard architecture.
-    fn addr_size(&self) -> BitSize {
+    fn pc_size(&self) -> BitSize {
         B16
     }
 

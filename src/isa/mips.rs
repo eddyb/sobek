@@ -177,7 +177,7 @@ impl State {
 }
 
 impl Isa for Mips32 {
-    fn addr_size(&self) -> BitSize {
+    fn pc_size(&self) -> BitSize {
         B32
     }
 

@@ -6,7 +6,7 @@ use crate::ir::{BitSize, Const, Cx, Edge, Edges, State};
 use crate::platform::Rom;
 
 pub trait Isa {
-    fn addr_size(&self) -> BitSize;
+    fn pc_size(&self) -> BitSize;
 
     // FIXME(eddyb) replace the `Result` with a dedicated enum.
     fn lift_instr(

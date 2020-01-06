@@ -147,7 +147,7 @@ impl I8080 {
 }
 
 impl Isa for I8080 {
-    fn addr_size(&self) -> BitSize {
+    fn pc_size(&self) -> BitSize {
         B16
     }
 
