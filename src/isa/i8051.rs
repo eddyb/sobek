@@ -33,7 +33,6 @@ impl Isa for I8051 {
     fn regs(&self, cx: &Cx) -> Vec<crate::ir::Reg> {
         (0..0x80)
             .map(|i| crate::ir::Reg {
-                index: i,
                 size: B8,
                 name: if i == Reg::SP as usize {
                     cx.a("sp")
@@ -52,7 +51,6 @@ impl Isa for I8051 {
                 },
             })
             .chain(iter::once(crate::ir::Reg {
-                index: Reg::PSW_C as usize,
                 size: B1,
                 name: cx.a("psw.c"),
             }))

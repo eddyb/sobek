@@ -1,5 +1,6 @@
+use itertools::{Either, Itertools};
 use scoped_tls::scoped_thread_local;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::iter;
 use std::mem;
@@ -317,8 +318,6 @@ impl IntOp {
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Reg {
-    // FIXME(eddyb) stop using indices for registers.
-    pub index: usize,
     pub size: BitSize,
     pub name: IStr,
 }
@@ -928,7 +927,7 @@ impl Visit for Node {
 impl INode {
     pub fn subst(self, cx: &Cx, base: &State) -> Self {
         cx.a(match cx[self] {
-            Node::InReg(r) => return base.regs[cx[r].index].unwrap_or(self),
+            Node::InReg(r) => return base.regs.get(&r).copied().unwrap_or(self),
 
             Node::Const(_) => return self,
 
@@ -984,8 +983,8 @@ impl Visit for Effect {
 pub struct State {
     pub mem: Option<INode>,
 
+    pub regs: BTreeMap<IReg, INode>,
     // FIXME(eddyb) stop using indices for registers.
-    pub regs: Vec<Option<INode>>,
     pub reg_defs: Vec<IReg>,
 }
 
@@ -999,22 +998,25 @@ impl State {
     }
 
     pub fn get(&self, cx: &Cx, r: IReg) -> INode {
-        self.regs[cx[r].index].unwrap_or_else(|| cx.a(Node::InReg(r)))
+        self.regs
+            .get(&r)
+            .copied()
+            .unwrap_or_else(|| cx.a(Node::InReg(r)))
     }
 
     pub fn set(&mut self, cx: &Cx, r: IReg, v: INode) {
-        self.regs[cx[r].index] = if cx[v] != Node::InReg(r) {
-            Some(v)
+        if cx[v] != Node::InReg(r) {
+            self.regs.insert(r, v);
         } else {
-            None
-        };
+            self.regs.remove(&r);
+        }
     }
 }
 
 impl Visit for State {
     fn walk(&self, visitor: &mut impl Visitor) {
         self.mem.visit(visitor);
-        for &v in &self.regs {
+        for &v in self.regs.values() {
             v.visit(visitor);
         }
     }
@@ -1305,17 +1307,17 @@ impl Cx {
         if has_states {
             let edge_states = edge_states_and_values.map(|(state, _), _| state.unwrap());
 
-            let reg_defs = edge_states.map(|state, _| &state.reg_defs).merge(|t, e| {
-                assert_eq!(t, e);
-                t
-            });
+            let regs = match edge_states.map(|state, _| state.regs.keys().copied()) {
+                Edges::One(regs) => Either::Left(regs),
+                Edges::Branch { t, e, .. } => Either::Right(t.merge(e).dedup()),
+            };
 
-            let mem_and_regs = iter::once(None).chain((0..reg_defs.len()).map(Some));
+            let mem_and_regs = iter::once(None).chain(Iterator::map(regs, Some));
             for maybe_reg in mem_and_regs {
                 let node = edge_states
                     .map(|state, _| match maybe_reg {
                         None => state.mem,
-                        Some(i) => state.regs[i],
+                        Some(r) => state.regs.get(&r).copied(),
                     })
                     .merge(|t, e| {
                         if t == e {
@@ -1332,13 +1334,13 @@ impl Cx {
                         None => {
                             use_counter.data.state_mem = Some(node);
                         }
-                        Some(i) => {
+                        Some(r) => {
                             use_counter
                                 .data
                                 .val_to_state_regs
                                 .entry(node)
                                 .or_default()
-                                .push(reg_defs[i]);
+                                .push(r);
                         }
                     }
                 }
@@ -1407,12 +1409,9 @@ impl Cx {
                                                 writeln!(f, "        m = {:?};", m)?;
                                             }
                                         }
-                                        for (i, &v) in state.regs.iter().enumerate() {
-                                            let r = state.reg_defs[i];
-                                            if v != other_state.regs[i] {
-                                                if let Some(v) = v {
-                                                    writeln!(f, "        {:?} = {:?};", r, v)?;
-                                                }
+                                        for (r, &v) in &state.regs {
+                                            if other_state.regs.get(r) != Some(&v) {
+                                                writeln!(f, "        {:?} = {:?};", r, v)?;
                                             }
                                         }
                                     }

@@ -96,12 +96,7 @@ impl Isa for Mips32 {
                         Some(suffix) => cx.a(&format!("{}.{}", name, suffix)[..]),
                     })
             })
-            .enumerate()
-            .map(move |(index, name)| crate::ir::Reg {
-                index,
-                size: B32,
-                name,
-            })
+            .map(|name| crate::ir::Reg { size: B32, name })
             .collect()
     }
 

@@ -74,34 +74,24 @@ impl Isa for I8080 {
 
     fn regs(&self, cx: &Cx) -> Vec<crate::ir::Reg> {
         iter::once(crate::ir::Reg {
-            index: Reg::A as usize,
             size: B8,
             name: cx.a("a"),
         })
-        .chain(
-            ["bc", "de", "hl", "sp"]
-                .iter()
-                .enumerate()
-                .map(|(i, &name)| crate::ir::Reg {
-                    index: Reg::BC as usize + i,
-                    size: B16,
-                    name: cx.a(name),
-                }),
-        )
+        .chain(["bc", "de", "hl", "sp"].iter().map(|&name| crate::ir::Reg {
+            size: B16,
+            name: cx.a(name),
+        }))
         .chain(
             // FIXME(eddyb) perhaps change names or even use different
             // sets of flags, depending on flavor.
             ["f.c", "f.h", "f.n", "f.z", "f.s", "f.p"]
                 .iter()
-                .enumerate()
-                .map(|(i, &name)| crate::ir::Reg {
-                    index: Reg::F_C as usize + i,
+                .map(|&name| crate::ir::Reg {
                     size: B1,
                     name: cx.a(name),
                 }),
         )
         .chain(iter::once(crate::ir::Reg {
-            index: Reg::IE as usize,
             size: B1,
             name: cx.a("ie"),
         }))
@@ -801,7 +791,10 @@ impl Isa for I8080 {
             }
             0xe9 => return jump!(state.get(cx, state.reg_defs[Reg::HL as usize])),
             0xeb => {
-                state.regs.swap(Reg::DE as usize, Reg::HL as usize);
+                let de = state.get(cx, state.reg_defs[Reg::DE as usize]);
+                let hl = state.get(cx, state.reg_defs[Reg::HL as usize]);
+                state.set(cx, state.reg_defs[Reg::DE as usize], hl);
+                state.set(cx, state.reg_defs[Reg::HL as usize], de);
             }
 
             0xd3 | 0xd8 | 0x22 | 0x2a => {

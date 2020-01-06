@@ -126,7 +126,7 @@ impl INode {
         cx.a(match cx[self] {
             Node::InReg(r) => {
                 return base
-                    .and_then(|base| base.regs[cx[r].index])
+                    .and_then(|base| base.regs.get(&r).copied())
                     .map_or(self, |v| v.subst_reduce(cx, rom, None))
             }
 
@@ -248,17 +248,16 @@ impl<'a> Explorer<'a> {
         // FIXME(eddyb) clean this up whenever NLL/Polonius can do the
         // efficient check (`if let Some(x) = map.get(k) { return x; }`).
         while !self.blocks.contains_key(&bb) {
-            let reg_defs: Vec<_> = self
-                .platform
-                .isa()
-                .regs(self.cx)
-                .into_iter()
-                .map(|r| self.cx.a(r))
-                .collect();
             let mut state = State {
-                mem: None,
-                regs: reg_defs.iter().map(|_| None).collect(),
-                reg_defs,
+                mem: Default::default(),
+                regs: Default::default(),
+                reg_defs: self
+                    .platform
+                    .isa()
+                    .regs(self.cx)
+                    .into_iter()
+                    .map(|r| self.cx.a(r))
+                    .collect(),
             };
             let mut pc = Const::new(self.platform.isa().addr_size(), bb.entry_pc);
             let edges = loop {
