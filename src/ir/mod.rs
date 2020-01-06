@@ -318,13 +318,20 @@ impl IntOp {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Type {
     Bits(BitSize),
-    Mem,
+    Mem { addr_size: BitSize },
 }
 
 impl Type {
     pub fn bit_size(self) -> Result<BitSize, Type> {
         match self {
             Type::Bits(size) => Ok(size),
+            _ => Err(self),
+        }
+    }
+
+    pub fn mem_addr_size(self) -> Result<BitSize, Type> {
+        match self {
+            Type::Mem { addr_size } => Ok(addr_size),
             _ => Err(self),
         }
     }
@@ -588,7 +595,9 @@ impl Node {
 
             Node::Load(r) => Type::Bits(r.size.into()),
 
-            Node::Store(..) => Type::Mem,
+            Node::Store(r, _) => Type::Mem {
+                addr_size: cx[r.addr].ty(cx).bit_size().unwrap(),
+            },
         }
     }
 
@@ -833,11 +842,21 @@ impl Node {
         }
 
         if let Node::Load(r) = self {
-            assert_eq!(cx[r.mem].ty(cx), Type::Mem);
+            assert_eq!(
+                cx[r.mem].ty(cx),
+                Type::Mem {
+                    addr_size: cx[r.addr].ty(cx).bit_size().unwrap()
+                }
+            );
         }
 
         if let Node::Store(r, v) = self {
-            assert_eq!(cx[r.mem].ty(cx), Type::Mem);
+            assert_eq!(
+                cx[r.mem].ty(cx),
+                Type::Mem {
+                    addr_size: cx[r.addr].ty(cx).bit_size().unwrap()
+                }
+            );
 
             let r_size: BitSize = r.size.into();
             assert_eq!(cx[v].ty(cx), Type::Bits(r_size));
@@ -1196,7 +1215,7 @@ impl Cx {
                     let prefix = match self.cx[node].ty(self.cx) {
                         // FIXME(eddyb) pre-intern.
                         Type::Bits(_) => self.cx.a("v"),
-                        Type::Mem => self.cx.a("m"),
+                        Type::Mem { .. } => self.cx.a("m"),
                     };
                     let numbered_count = self.data.numbered_counts.entry(prefix).or_default();
                     let next = *numbered_count;

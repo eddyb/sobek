@@ -15,7 +15,7 @@ impl I8051 {
     pub fn new(cx: &Cx) -> Self {
         I8051 {
             mem: cx.a(Global {
-                ty: Type::Mem,
+                ty: Type::Mem { addr_size: B8 },
                 name: cx.a("m"),
             }),
             regs: Regs::new(cx),
@@ -128,15 +128,13 @@ impl Isa for I8051 {
             }
         }
         macro_rules! mem_ref {
-            ($addr:expr, $sz:ident) => {{
-                let addr = $addr;
-                assert_eq!(cx[addr].ty(cx), Type::Bits(B8));
+            ($addr:expr, $sz:ident) => {
                 MemRef {
                     mem: state.get(cx, self.mem),
-                    addr,
+                    addr: $addr,
                     size: MemSize::$sz,
                 }
-            }};
+            };
             ($addr:expr) => {
                 mem_ref!($addr, M8)
             };

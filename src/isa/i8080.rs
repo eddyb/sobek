@@ -23,7 +23,7 @@ impl I8080 {
         I8080 {
             flavor: Flavor::Intel,
             mem: cx.a(Global {
-                ty: Type::Mem,
+                ty: Type::Mem { addr_size: B16 },
                 name: cx.a("m"),
             }),
             regs: Regs::new(cx),
@@ -34,7 +34,7 @@ impl I8080 {
         I8080 {
             flavor: Flavor::LR35902,
             mem: cx.a(Global {
-                ty: Type::Mem,
+                ty: Type::Mem { addr_size: B16 },
                 name: cx.a("m"),
             }),
             regs: Regs::new(cx),
@@ -193,15 +193,13 @@ impl Isa for I8080 {
             }
         }
         macro_rules! mem_ref {
-            ($addr:expr, $sz:ident) => {{
-                let addr = $addr;
-                assert_eq!(cx[addr].ty(cx), Type::Bits(B16));
+            ($addr:expr, $sz:ident) => {
                 MemRef {
                     mem: state.get(cx, self.mem),
-                    addr,
+                    addr: $addr,
                     size: MemSize::$sz,
                 }
-            }};
+            };
             ($addr:expr) => {
                 mem_ref!($addr, M8)
             };

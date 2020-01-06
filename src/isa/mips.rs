@@ -17,7 +17,7 @@ impl Mips32 {
     pub fn new(cx: &Cx) -> Self {
         Mips32 {
             mem: cx.a(Global {
-                ty: Type::Mem,
+                ty: Type::Mem { addr_size: B32 },
                 name: cx.a("m"),
             }),
             regs32: Regs32::new(cx, None),
