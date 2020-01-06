@@ -64,7 +64,7 @@ const NUM_REGS: usize = 32 + 2;
 
 // FIXME(eddyb) make a `State` wrapper to contain these helpers.
 impl State {
-    fn get(&self, cx: &Cx, r: usize) -> INode {
+    fn get_mips32(&self, cx: &Cx, r: usize) -> INode {
         if r == 0 || r == NUM_REGS {
             cx.a(Const::new(B32, 0))
         } else {
@@ -72,7 +72,7 @@ impl State {
         }
     }
 
-    fn set(&mut self, r: usize, v: INode) {
+    fn set_mips32(&mut self, r: usize, v: INode) {
         if r != 0 && r != NUM_REGS {
             self.regs[r] = v;
         }
@@ -146,7 +146,7 @@ impl Isa for Mips32 {
 
         macro_rules! link {
             ($r:expr) => {
-                state.set($r, cx.a(add4(*pc)))
+                state.set_mips32($r, cx.a(add4(*pc)))
             };
             () => {
                 link!(31)
@@ -261,12 +261,12 @@ impl Isa for Mips32 {
                         node!(Int(
                             IntOp::Shl,
                             B64,
-                            node!(Zext(B64, state.get(cx, NUM_REGS + i))),
+                            node!(Zext(B64, state.get_mips32(cx, NUM_REGS + i))),
                             cx.a(Const::new(B8, 32))
                         )),
-                        node!(Zext(B64, state.get(cx, i)))
+                        node!(Zext(B64, state.get_mips32(cx, i)))
                     )),
-                    B32 => state.get(cx, i),
+                    B32 => state.get_mips32(cx, i),
                     _ => unreachable!(),
                 }
             }};
@@ -277,8 +277,8 @@ impl Isa for Mips32 {
                 let val = $val;
                 match size {
                     B64 => {
-                        state.set(i, node!(Trunc(B32, val)));
-                        state.set(
+                        state.set_mips32(i, node!(Trunc(B32, val)));
+                        state.set_mips32(
                             NUM_REGS + i,
                             node!(Trunc(
                                 B32,
@@ -286,7 +286,7 @@ impl Isa for Mips32 {
                             )),
                         );
                     }
-                    B32 => state.set(i, val),
+                    B32 => state.set_mips32(i, val),
                     _ => unreachable!(),
                 }
             }};
@@ -397,7 +397,7 @@ impl Isa for Mips32 {
             set_reg_maybe64!(rd, v);
         } else if op == 1 {
             // REGIMM (I format w/o rt).
-            let rs = state.get(cx, rs);
+            let rs = state.get_mips32(cx, rs);
             match rt {
                 0 => {
                     return branch!(node!(Int(IntOp::LtS, B32, rs, cx.a(Const::new(B32, 0)))) => true)
@@ -460,7 +460,7 @@ impl Isa for Mips32 {
             }
 
             let rd = rt;
-            let rs = state.get(cx, rs);
+            let rs = state.get_mips32(cx, rs);
             let rt = get_reg_maybe64!(rt);
 
             macro_rules! mem_ref {
@@ -506,15 +506,15 @@ impl Isa for Mips32 {
                     if cx[v].ty(cx) == Type::Bits(B1) {
                         v = node!(Zext(B32, v));
                     }
-                    state.set(rd, v);
+                    state.set_mips32(rd, v);
                 }
-                15 => state.set(rd, cx.a(Const::new(B32, (imm.as_u32() << 16) as u64))),
+                15 => state.set_mips32(rd, cx.a(Const::new(B32, (imm.as_u32() << 16) as u64))),
 
-                32 => state.set(rd, node!(Sext(B32, node!(Load(mem_ref!(M8)))))),
-                33 => state.set(rd, node!(Sext(B32, node!(Load(mem_ref!(M16)))))),
-                35 => state.set(rd, node!(Load(mem_ref!(M32)))),
-                36 => state.set(rd, node!(Zext(B32, node!(Load(mem_ref!(M8)))))),
-                37 => state.set(rd, node!(Zext(B32, node!(Load(mem_ref!(M16)))))),
+                32 => state.set_mips32(rd, node!(Sext(B32, node!(Load(mem_ref!(M8)))))),
+                33 => state.set_mips32(rd, node!(Sext(B32, node!(Load(mem_ref!(M16)))))),
+                35 => state.set_mips32(rd, node!(Load(mem_ref!(M32)))),
+                36 => state.set_mips32(rd, node!(Zext(B32, node!(Load(mem_ref!(M8)))))),
+                37 => state.set_mips32(rd, node!(Zext(B32, node!(Load(mem_ref!(M16)))))),
 
                 40 => state.mem = node!(Store(mem_ref!(M8), node!(Trunc(B8, rt)))),
                 41 => state.mem = node!(Store(mem_ref!(M16), node!(Trunc(B16, rt)))),
