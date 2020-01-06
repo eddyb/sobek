@@ -1,11 +1,24 @@
 use crate::ir::{
     BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, INode, IntOp, MemRef, MemSize, Node, State, Type,
+    Const, Cx, Edge, Edges, Effect, INode, IReg, IntOp, MemRef, MemSize, Node, State, Type,
 };
 use crate::isa::Isa;
 use crate::platform::Rom;
+use std::ops::Index;
 
-pub struct Mips32;
+pub struct Mips32 {
+    regs32: Regs32,
+    regs64_upper: Regs32,
+}
+
+impl Mips32 {
+    pub fn new(cx: &Cx) -> Self {
+        Mips32 {
+            regs32: Regs32::new(cx, None),
+            regs64_upper: Regs32::new(cx, Some("upper")),
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -34,47 +47,125 @@ impl Mips32 {
     }
 }
 
-macro_rules! reg_names {
-    ($($name:ident)*) => {
-        [$(stringify!($name)),*]
+struct Regs32 {
+    gpr: [IReg; 32],
+    lo: IReg,
+    hi: IReg,
+}
+
+impl Regs32 {
+    fn new(cx: &Cx, suffix: Option<&str>) -> Self {
+        let reg = |name| {
+            cx.a(crate::ir::Reg {
+                size: B32,
+                name: match suffix {
+                    None => cx.a(name),
+                    Some(suffix) => cx.a(&format!("{}.{}", name, suffix)[..]),
+                },
+            })
+        };
+
+        macro_rules! reg_array {
+            ($($name:ident)*) => {
+                [$(reg(stringify!($name))),*]
+            }
+        }
+
+        Regs32 {
+            gpr: reg_array![
+                zero__THIS_SHOULD_NEVER_BE_USED
+                at
+                rv0 rv1
+                a0 a1 a2 a3
+                t0 t1 t2 t3 t4 t5 t6 t7
+                s0 s1 s2 s3 s4 s5 s6 s7
+                t8 t9
+                k0 k1
+                gp
+                sp
+                fp
+                ra
+            ],
+            lo: reg("lo"),
+            hi: reg("hi"),
+        }
     }
 }
 
-const GPR_NAMES: [&str; 32] = reg_names![
-    zero__THIS_SHOULD_NEVER_BE_USED
-    at
-    rv0 rv1
-    a0 a1 a2 a3
-    t0 t1 t2 t3 t4 t5 t6 t7
-    s0 s1 s2 s3 s4 s5 s6 s7
-    t8 t9
-    k0 k1
-    gp
-    sp
-    fp
-    ra
-];
-
+#[derive(Copy, Clone)]
 enum Reg {
-    Lo = 32,
+    Gpr(u8),
+    Lo,
     Hi,
 }
 
-const NUM_REGS: usize = 32 + 2;
+impl From<u32> for Reg {
+    fn from(i: u32) -> Self {
+        assert!(i < 32);
+        Reg::Gpr(i as u8)
+    }
+}
+
+impl Index<Reg> for Regs32 {
+    type Output = IReg;
+
+    fn index(&self, r: Reg) -> &IReg {
+        match r {
+            Reg::Gpr(i) => &self.gpr[i as usize],
+            Reg::Lo => &self.lo,
+            Reg::Hi => &self.hi,
+        }
+    }
+}
 
 // FIXME(eddyb) make a `State` wrapper to contain these helpers.
 impl State {
-    fn get_mips32(&self, cx: &Cx, r: usize) -> INode {
-        if r == 0 || r == NUM_REGS {
-            cx.a(Const::new(B32, 0))
+    fn mips32_get(&self, isa: &Mips32, cx: &Cx, r: impl Into<Reg>, size: BitSize) -> INode {
+        let r = r.into();
+        if let Reg::Gpr(0) = r {
+            cx.a(Const::new(size, 0))
         } else {
-            self.get(cx, self.reg_defs[r])
+            let v32 = self.get(cx, isa.regs32[r]);
+            match size {
+                B32 => v32,
+                B64 => cx.a(Node::Int(
+                    IntOp::Or,
+                    B64,
+                    cx.a(Node::Int(
+                        IntOp::Shl,
+                        B64,
+                        cx.a(Node::Zext(B64, self.get(cx, isa.regs64_upper[r]))),
+                        cx.a(Const::new(B8, 32)),
+                    )),
+                    cx.a(Node::Zext(B64, v32)),
+                )),
+                _ => unreachable!(),
+            }
         }
     }
 
-    fn set_mips32(&mut self, cx: &Cx, r: usize, v: INode) {
-        if r != 0 && r != NUM_REGS {
-            self.set(cx, self.reg_defs[r], v);
+    fn mips32_set(&mut self, isa: &Mips32, cx: &Cx, r: impl Into<Reg>, v: INode) {
+        let r = r.into();
+        if let Reg::Gpr(0) = r {
+            // Writes to the zero register are noops.
+        } else {
+            let size = cx[v].ty(cx).bit_size().unwrap();
+            let v32 = match size {
+                B32 => v,
+                B64 => cx.a(Node::Trunc(B32, v)),
+                _ => unreachable!(),
+            };
+            self.set(cx, isa.regs32[r], v32);
+            if size == B64 {
+                self.set(
+                    cx,
+                    isa.regs64_upper[r],
+                    cx.a(Node::Trunc(
+                        B32,
+                        cx.a(Node::Int(IntOp::ShrU, B64, v, cx.a(Const::new(B8, 32)))),
+                    )),
+                );
+            }
         }
     }
 }
@@ -82,22 +173,6 @@ impl State {
 impl Isa for Mips32 {
     fn addr_size(&self) -> BitSize {
         B32
-    }
-
-    fn regs(&self, cx: &Cx) -> Vec<crate::ir::Reg> {
-        [None, Some("upper")]
-            .iter()
-            .flat_map(|&suffix| {
-                GPR_NAMES
-                    .iter()
-                    .chain(&["lo", "hi"])
-                    .map(move |&name| match suffix {
-                        None => cx.a(name),
-                        Some(suffix) => cx.a(&format!("{}.{}", name, suffix)[..]),
-                    })
-            })
-            .map(|name| crate::ir::Reg { size: B32, name })
-            .collect()
     }
 
     fn lift_instr(
@@ -127,7 +202,7 @@ impl Isa for Mips32 {
 
         let op = instr >> 26;
         let (rs, rt, rd) = {
-            let r = |i| field(11 + 5 * i, 5) as usize;
+            let r = |i| field(11 + 5 * i, 5);
             (r(2), r(1), r(0))
         };
         let imm = Const::new(B32, instr as i16 as i32 as u32 as u64);
@@ -141,7 +216,7 @@ impl Isa for Mips32 {
 
         macro_rules! link {
             ($r:expr) => {
-                state.set_mips32(cx, $r, cx.a(add4(*pc)))
+                state.mips32_set(self, cx, $r, cx.a(add4(*pc)))
             };
             () => {
                 link!(31)
@@ -247,45 +322,14 @@ impl Isa for Mips32 {
 
         let mut size = B32;
         macro_rules! get_reg_maybe64 {
-            ($i:expr) => {{
-                let i = $i as usize;
-                match size {
-                    B64 => node!(Int(
-                        IntOp::Or,
-                        B64,
-                        node!(Int(
-                            IntOp::Shl,
-                            B64,
-                            node!(Zext(B64, state.get_mips32(cx, NUM_REGS + i))),
-                            cx.a(Const::new(B8, 32))
-                        )),
-                        node!(Zext(B64, state.get_mips32(cx, i)))
-                    )),
-                    B32 => state.get_mips32(cx, i),
-                    _ => unreachable!(),
-                }
-            }};
+            ($r:expr) => {
+                state.mips32_get(self, cx, $r, size)
+            };
         }
         macro_rules! set_reg_maybe64 {
-            ($i:expr, $val:expr) => {{
-                let i = $i as usize;
-                let val = $val;
-                match size {
-                    B64 => {
-                        state.set_mips32(cx, i, node!(Trunc(B32, val)));
-                        state.set_mips32(
-                            cx,
-                            NUM_REGS + i,
-                            node!(Trunc(
-                                B32,
-                                node!(Int(IntOp::ShrU, B64, val, cx.a(Const::new(B8, 32))))
-                            )),
-                        );
-                    }
-                    B32 => state.set_mips32(cx, i, val),
-                    _ => unreachable!(),
-                }
-            }};
+            ($r:expr, $val:expr) => {
+                state.mips32_set(self, cx, $r, $val)
+            };
         }
 
         if op == 0 {
@@ -333,26 +377,26 @@ impl Isa for Mips32 {
                     return jump!(rs);
                 }
 
-                16 => get_reg_maybe64!(Reg::Hi as usize),
+                16 => get_reg_maybe64!(Reg::Hi),
                 17 => {
-                    set_reg_maybe64!(Reg::Hi as usize, rs);
+                    set_reg_maybe64!(Reg::Hi, rs);
                     return Ok(state);
                 }
-                18 => get_reg_maybe64!(Reg::Lo as usize),
+                18 => get_reg_maybe64!(Reg::Lo),
                 19 => {
-                    set_reg_maybe64!(Reg::Lo as usize, rs);
+                    set_reg_maybe64!(Reg::Lo, rs);
                     return Ok(state);
                 }
 
                 26 | 30 => {
-                    set_reg_maybe64!(Reg::Lo as usize, node!(Int(IntOp::DivS, size, rs, rt)));
-                    set_reg_maybe64!(Reg::Hi as usize, node!(Int(IntOp::RemS, size, rs, rt)));
+                    set_reg_maybe64!(Reg::Lo, node!(Int(IntOp::DivS, size, rs, rt)));
+                    set_reg_maybe64!(Reg::Hi, node!(Int(IntOp::RemS, size, rs, rt)));
                     return Ok(state);
                 }
 
                 27 | 31 => {
-                    set_reg_maybe64!(Reg::Lo as usize, node!(Int(IntOp::DivU, size, rs, rt)));
-                    set_reg_maybe64!(Reg::Hi as usize, node!(Int(IntOp::RemU, size, rs, rt)));
+                    set_reg_maybe64!(Reg::Lo, node!(Int(IntOp::DivU, size, rs, rt)));
+                    set_reg_maybe64!(Reg::Hi, node!(Int(IntOp::RemU, size, rs, rt)));
                     return Ok(state);
                 }
 
@@ -361,8 +405,8 @@ impl Isa for Mips32 {
                     // `Sext(B128, ...)` for `funct=28`, and `Zext(B128, ...)`
                     // for `funct=29`, or emulate it using 64-bit operations only.
                     let result = node!(Int(IntOp::Mul, size, rs, rt));
-                    set_reg_maybe64!(Reg::Lo as usize, result);
-                    set_reg_maybe64!(Reg::Hi as usize, cx.a(Const::new(size, 0)));
+                    set_reg_maybe64!(Reg::Lo, result);
+                    set_reg_maybe64!(Reg::Hi, cx.a(Const::new(size, 0)));
                     return Ok(state);
                 }
 
@@ -393,7 +437,7 @@ impl Isa for Mips32 {
             set_reg_maybe64!(rd, v);
         } else if op == 1 {
             // REGIMM (I format w/o rt).
-            let rs = state.get_mips32(cx, rs);
+            let rs = state.mips32_get(self, cx, rs, B32);
             match rt {
                 0 => {
                     return branch!(node!(Int(IntOp::LtS, B32, rs, cx.a(Const::new(B32, 0)))) => true)
@@ -456,7 +500,7 @@ impl Isa for Mips32 {
             }
 
             let rd = rt;
-            let rs = state.get_mips32(cx, rs);
+            let rs = state.mips32_get(self, cx, rs, B32);
             let rt = get_reg_maybe64!(rt);
 
             macro_rules! mem_ref {
@@ -502,15 +546,20 @@ impl Isa for Mips32 {
                     if cx[v].ty(cx) == Type::Bits(B1) {
                         v = node!(Zext(B32, v));
                     }
-                    state.set_mips32(cx, rd, v);
+                    state.mips32_set(self, cx, rd, v);
                 }
-                15 => state.set_mips32(cx, rd, cx.a(Const::new(B32, (imm.as_u32() << 16) as u64))),
+                15 => state.mips32_set(
+                    self,
+                    cx,
+                    rd,
+                    cx.a(Const::new(B32, (imm.as_u32() << 16) as u64)),
+                ),
 
-                32 => state.set_mips32(cx, rd, node!(Sext(B32, node!(Load(mem_ref!(M8)))))),
-                33 => state.set_mips32(cx, rd, node!(Sext(B32, node!(Load(mem_ref!(M16)))))),
-                35 => state.set_mips32(cx, rd, node!(Load(mem_ref!(M32)))),
-                36 => state.set_mips32(cx, rd, node!(Zext(B32, node!(Load(mem_ref!(M8)))))),
-                37 => state.set_mips32(cx, rd, node!(Zext(B32, node!(Load(mem_ref!(M16)))))),
+                32 => state.mips32_set(self, cx, rd, node!(Sext(B32, node!(Load(mem_ref!(M8)))))),
+                33 => state.mips32_set(self, cx, rd, node!(Sext(B32, node!(Load(mem_ref!(M16)))))),
+                35 => state.mips32_set(self, cx, rd, node!(Load(mem_ref!(M32)))),
+                36 => state.mips32_set(self, cx, rd, node!(Zext(B32, node!(Load(mem_ref!(M8)))))),
+                37 => state.mips32_set(self, cx, rd, node!(Zext(B32, node!(Load(mem_ref!(M16)))))),
 
                 40 => state.set_mem(cx, node!(Store(mem_ref!(M8), node!(Trunc(B8, rt))))),
                 41 => state.set_mem(cx, node!(Store(mem_ref!(M16), node!(Trunc(B16, rt))))),
@@ -524,7 +573,7 @@ impl Isa for Mips32 {
                             call: format!(
                                 "CACHE(op={}, base={}, imm={:?})",
                                 field(16, 5),
-                                GPR_NAMES[field(21, 5) as usize],
+                                &cx[cx[self.regs32[Reg::from(field(21, 5))]].name],
                                 imm,
                             ),
                             next_pc: cx.a(*pc),
@@ -543,7 +592,7 @@ impl Isa for Mips32 {
                                 if (op & 8) == 0 { 'L' } else { 'S' },
                                 if (op & 4) == 0 { 'W' } else { 'D' },
                                 rd,
-                                GPR_NAMES[field(21, 5) as usize],
+                                &cx[cx[self.regs32[Reg::from(field(21, 5))]].name],
                                 imm
                             ),
                             next_pc: cx.a(*pc),

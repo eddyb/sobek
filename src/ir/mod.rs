@@ -984,8 +984,6 @@ pub struct State {
     pub mem: Option<INode>,
 
     pub regs: BTreeMap<IReg, INode>,
-    // FIXME(eddyb) stop using indices for registers.
-    pub reg_defs: Vec<IReg>,
 }
 
 impl State {

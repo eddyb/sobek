@@ -10,9 +10,16 @@ use std::iter;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-fn analyze_and_dump(isa: impl Isa, rom: impl Rom, entries: impl Iterator<Item = Const>) {
+fn analyze_and_dump<I: Isa>(
+    mk_isa: impl FnOnce(&Cx) -> I,
+    rom: impl Rom,
+    entries: impl Iterator<Item = Const>,
+) {
     let cx = Cx::new();
-    let platform = SimplePlatform { isa, rom };
+    let platform = SimplePlatform {
+        isa: mk_isa(&cx),
+        rom,
+    };
 
     let cancel_token = Arc::new(AtomicBool::new(false));
     let ctrcc_result = {
@@ -60,7 +67,7 @@ fn main() {
     match &isa[..] {
         "8051" => {
             analyze_and_dump(
-                I8051,
+                I8051::new,
                 RawRom {
                     big_endian: false,
                     data,
@@ -70,9 +77,7 @@ fn main() {
         }
         "8080" => {
             analyze_and_dump(
-                I8080 {
-                    flavor: sobek::isa::i8080::Flavor::Intel,
-                },
+                I8080::new,
                 RawRom {
                     big_endian: false,
                     data,
@@ -82,9 +87,7 @@ fn main() {
         }
         "gb" => {
             analyze_and_dump(
-                I8080 {
-                    flavor: sobek::isa::i8080::Flavor::LR35902,
-                },
+                I8080::new_lr35902,
                 RawRom {
                     big_endian: false,
                     data,
@@ -100,7 +103,7 @@ fn main() {
                 data,
             });
             let entry_pc = rom.base;
-            analyze_and_dump(Mips32, rom, iter::once(entry_pc));
+            analyze_and_dump(Mips32::new, rom, iter::once(entry_pc));
         }
         _ => panic!("unsupport isa {:?}", isa),
     }

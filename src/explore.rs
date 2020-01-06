@@ -251,13 +251,6 @@ impl<'a> Explorer<'a> {
             let mut state = State {
                 mem: Default::default(),
                 regs: Default::default(),
-                reg_defs: self
-                    .platform
-                    .isa()
-                    .regs(self.cx)
-                    .into_iter()
-                    .map(|r| self.cx.a(r))
-                    .collect(),
             };
             let mut pc = Const::new(self.platform.isa().addr_size(), bb.entry_pc);
             let edges = loop {
