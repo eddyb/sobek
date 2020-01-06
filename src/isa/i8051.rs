@@ -9,6 +9,7 @@ use std::ops::Index;
 pub struct I8051 {
     mem: IGlobal,
     rom: IGlobal,
+    ext: IGlobal,
     regs: Regs,
 }
 
@@ -22,6 +23,10 @@ impl I8051 {
             rom: cx.a(Global {
                 ty: Type::Mem { addr_size: B16 },
                 name: cx.a("rom"),
+            }),
+            ext: cx.a(Global {
+                ty: Type::Mem { addr_size: B16 },
+                name: cx.a("ext"),
             }),
             regs: Regs::new(cx),
         }
@@ -716,6 +721,25 @@ impl Isa for I8051 {
                         cx.a(Const::new(B8, 1 << bit))
                     )));
                 }
+                0xe0 | 0xe2 | 0xe3 | 0xf0 | 0xf2 | 0xf3 => {
+                    operand = Operand::Mem(
+                        self.ext,
+                        if (op & 0xf) == 0 {
+                            get_dptr!()
+                        } else {
+                            node!(Zext(
+                                B16,
+                                node!(Load(mem_ref!(cx.a(Const::new(B8, (op & 1) as u64)))))
+                            ))
+                        },
+                    );
+                    if (op & 0xf0) == 0xe0 {
+                        state.set(cx, self.regs[Sfr::A], get!());
+                    } else {
+                        set!(state.get(cx, self.regs[Sfr::A]));
+                    }
+                }
+
                 _ => error!("unsupported opcode 0x{:x}", op),
             }
         }
