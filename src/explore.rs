@@ -2,7 +2,7 @@ use crate::ir::{
     BitSize, Block, Const, Cx, Edge, Edges, Effect, INode, MemRef, MemSize, Node, State, Visit,
     Visitor,
 };
-use crate::platform::{Platform, Rom};
+use crate::platform::Platform;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -82,20 +82,22 @@ impl INode {
     // HACK(eddyb) try to get the last stored value.
     fn subst_reduce_load(
         self,
-        cx: &Cx,
-        rom: &dyn Rom,
+        explorer: &Explorer<'_>,
         base: Option<&State>,
         addr: INode,
         size: MemSize,
     ) -> INode {
+        let cx = explorer.cx;
         match cx[self] {
             Node::GlobalIn(g) => match base.and_then(|base| base.globals.get(&g).copied()) {
-                Some(m) => m.subst_reduce_load(cx, rom, None, addr, size),
+                Some(m) => m.subst_reduce_load(explorer, None, addr, size),
                 None => {
-                    // HACK(eddyb) assume it's from the ROM, if in range of it.
-                    if let Some(addr) = cx[addr].as_const() {
-                        if let Ok(v) = rom.load(addr, size) {
-                            return cx.a(v);
+                    if g == explorer.platform.isa().mem_containing_rom() {
+                        // HACK(eddyb) assume it's from the ROM, if in range of it.
+                        if let Some(addr) = cx[addr].as_const() {
+                            if let Ok(v) = explorer.platform.rom().load(addr, size) {
+                                return cx.a(v);
+                            }
                         }
                     }
 
@@ -108,10 +110,10 @@ impl INode {
             },
 
             Node::Store(r, v) => {
-                if r.addr.subst_reduce(cx, rom, base) == addr && r.size == size {
-                    v.subst_reduce(cx, rom, base)
+                if r.addr.subst_reduce(explorer, base) == addr && r.size == size {
+                    v.subst_reduce(explorer, base)
                 } else {
-                    r.mem.subst_reduce_load(cx, rom, base, addr, size)
+                    r.mem.subst_reduce_load(explorer, base, addr, size)
                 }
             }
 
@@ -122,12 +124,13 @@ impl INode {
 
 // FIXME(eddyb) introduce a more general "folder" abstraction.
 impl INode {
-    fn subst_reduce(self, cx: &Cx, rom: &dyn Rom, base: Option<&State>) -> Self {
+    fn subst_reduce(self, explorer: &Explorer<'_>, base: Option<&State>) -> Self {
+        let cx = explorer.cx;
         cx.a(match cx[self] {
             Node::GlobalIn(g) => {
                 return base
                     .and_then(|base| base.globals.get(&g).copied())
-                    .map_or(self, |node| node.subst_reduce(cx, rom, None))
+                    .map_or(self, |node| node.subst_reduce(explorer, None))
             }
 
             Node::Const(_) => return self,
@@ -135,24 +138,24 @@ impl INode {
             Node::Int(op, size, a, b) => Node::Int(
                 op,
                 size,
-                a.subst_reduce(cx, rom, base),
-                b.subst_reduce(cx, rom, base),
+                a.subst_reduce(explorer, base),
+                b.subst_reduce(explorer, base),
             ),
-            Node::Trunc(size, x) => Node::Trunc(size, x.subst_reduce(cx, rom, base)),
-            Node::Sext(size, x) => Node::Sext(size, x.subst_reduce(cx, rom, base)),
-            Node::Zext(size, x) => Node::Zext(size, x.subst_reduce(cx, rom, base)),
+            Node::Trunc(size, x) => Node::Trunc(size, x.subst_reduce(explorer, base)),
+            Node::Sext(size, x) => Node::Sext(size, x.subst_reduce(explorer, base)),
+            Node::Zext(size, x) => Node::Zext(size, x.subst_reduce(explorer, base)),
             Node::Load(r) => {
-                let addr = r.addr.subst_reduce(cx, rom, base);
-                return r.mem.subst_reduce_load(cx, rom, base, addr, r.size);
+                let addr = r.addr.subst_reduce(explorer, base);
+                return r.mem.subst_reduce_load(explorer, base, addr, r.size);
             }
 
             Node::Store(r, x) => Node::Store(
                 MemRef {
-                    mem: r.mem.subst_reduce(cx, rom, base),
-                    addr: r.addr.subst_reduce(cx, rom, base),
+                    mem: r.mem.subst_reduce(explorer, base),
+                    addr: r.addr.subst_reduce(explorer, base),
                     size: r.size,
                 },
-                x.subst_reduce(cx, rom, base),
+                x.subst_reduce(explorer, base),
             ),
         })
     }
@@ -351,11 +354,10 @@ impl<'a> Explorer<'a> {
                 next_pc: direct_target,
                 ..
             } => Exit {
-                targets: Set1::One(direct_target.subst_reduce(self.cx, self.platform.rom(), None)),
+                targets: Set1::One(direct_target.subst_reduce(self, None)),
                 arg_values: options.arg_value.map_or(Set1::Empty, |arg_value| {
                     Set1::One(arg_value.subst_reduce(
-                        self.cx,
-                        self.platform.rom(),
+                        self,
                         Some(&self.blocks[&bb].edges.as_ref().get(br_cond).state),
                     ))
                 }),
@@ -435,8 +437,7 @@ impl<'a> Explorer<'a> {
                     }
                     values.map(|arg_value| {
                         arg_value.subst_reduce(
-                            self.cx,
-                            self.platform.rom(),
+                            self,
                             Some(&self.blocks[&bb].edges.as_ref().get(br_cond).state),
                         )
                     })
