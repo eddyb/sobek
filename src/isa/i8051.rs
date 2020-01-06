@@ -674,6 +674,18 @@ impl Isa for I8051 {
                         ))
                     )));
                 }
+                0xa3 => {
+                    let v = node!(Int(IntOp::Add, B16, get_dptr!(), cx.a(Const::new(B16, 1))));
+                    state.set(cx, self.regs[Sfr::DPL], node!(Trunc(B8, v)));
+                    state.set(
+                        cx,
+                        self.regs[Sfr::DPH],
+                        node!(Trunc(
+                            B8,
+                            node!(Int(IntOp::ShrU, B16, v, cx.a(Const::new(B8, 8))))
+                        )),
+                    );
+                }
                 0xb2 => {
                     let bit = bit_addr!();
                     set!(node!(Int(
