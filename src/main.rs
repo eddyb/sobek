@@ -45,7 +45,10 @@ fn analyze_and_dump<I: Isa>(
     let nester = sobek::nest::Nester::new(&explorer);
 
     let mut nested_pc = ..Const::new(
-        platform.isa.pc_size(),
+        cx[platform.isa.mem_containing_rom()]
+            .ty
+            .mem_addr_size()
+            .unwrap(),
         explorer.blocks.keys().next().unwrap().entry_pc,
     );
     let mut last_end = nested_pc.end.as_u64();

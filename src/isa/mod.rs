@@ -2,11 +2,11 @@ pub mod i8051;
 pub mod i8080;
 pub mod mips;
 
-use crate::ir::{BitSize, Const, Cx, Edge, Edges, State};
+use crate::ir::{Const, Cx, Edge, Edges, IGlobal, State};
 use crate::platform::Rom;
 
 pub trait Isa {
-    fn pc_size(&self) -> BitSize;
+    fn mem_containing_rom(&self) -> IGlobal;
 
     // FIXME(eddyb) replace the `Result` with a dedicated enum.
     fn lift_instr(

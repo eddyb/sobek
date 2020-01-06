@@ -1,6 +1,6 @@
 use crate::ir::{
-    BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, Global, IGlobal, IntOp, MemRef, MemSize, Node, State, Type,
+    BitSize::*, Const, Cx, Edge, Edges, Effect, Global, IGlobal, IntOp, MemRef, MemSize, Node,
+    State, Type,
 };
 use crate::isa::Isa;
 use crate::platform::Rom;
@@ -147,8 +147,8 @@ impl I8080 {
 }
 
 impl Isa for I8080 {
-    fn pc_size(&self) -> BitSize {
-        B16
+    fn mem_containing_rom(&self) -> IGlobal {
+        self.mem
     }
 
     fn lift_instr(

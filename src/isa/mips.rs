@@ -177,8 +177,8 @@ impl State {
 }
 
 impl Isa for Mips32 {
-    fn pc_size(&self) -> BitSize {
-        B32
+    fn mem_containing_rom(&self) -> IGlobal {
+        self.mem
     }
 
     fn lift_instr(

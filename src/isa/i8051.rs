@@ -1,6 +1,6 @@
 use crate::ir::{
-    BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, Global, IGlobal, IntOp, MemRef, MemSize, Node, State, Type,
+    BitSize::*, Const, Cx, Edge, Edges, Effect, Global, IGlobal, INode, IntOp, MemRef, MemSize,
+    Node, State, Type,
 };
 use crate::isa::Isa;
 use crate::platform::Rom;
@@ -8,6 +8,7 @@ use std::ops::Index;
 
 pub struct I8051 {
     mem: IGlobal,
+    rom: IGlobal,
     regs: Regs,
 }
 
@@ -17,6 +18,10 @@ impl I8051 {
             mem: cx.a(Global {
                 ty: Type::Mem { addr_size: B8 },
                 name: cx.a("m"),
+            }),
+            rom: cx.a(Global {
+                ty: Type::Mem { addr_size: B16 },
+                name: cx.a("rom"),
             }),
             regs: Regs::new(cx),
         }
@@ -84,8 +89,8 @@ impl Index<Sfr> for Regs {
 }
 
 impl Isa for I8051 {
-    fn pc_size(&self) -> BitSize {
-        B16
+    fn mem_containing_rom(&self) -> IGlobal {
+        self.rom
     }
 
     fn lift_instr(
@@ -182,6 +187,22 @@ impl Isa for I8051 {
             }};
         }
 
+        macro_rules! get_dptr {
+            () => {
+                node!(Int(
+                    IntOp::Or,
+                    B16,
+                    node!(Int(
+                        IntOp::Shl,
+                        B16,
+                        node!(Zext(B16, state.get(cx, self.regs[Sfr::DPH]))),
+                        cx.a(Const::new(B8, 8))
+                    )),
+                    node!(Zext(B16, state.get(cx, self.regs[Sfr::DPL])))
+                ))
+            };
+        }
+
         macro_rules! jump {
             ($target:expr) => {
                 Err(Edges::One(Edge {
@@ -243,7 +264,7 @@ impl Isa for I8051 {
         enum Operand {
             Imm(Const),
             Sfr(u8),
-            Mem(MemRef),
+            Mem(IGlobal, INode),
         }
 
         let operand;
@@ -257,7 +278,11 @@ impl Isa for I8051 {
                         assert!(i != Sfr::PSW as u8);
                         state.get(cx, self.regs.sfr[i as usize])
                     }
-                    Operand::Mem(m) => node!(Load(m)),
+                    Operand::Mem(mem, addr) => node!(Load(MemRef {
+                        mem: state.get(cx, mem),
+                        addr,
+                        size: MemSize::M8,
+                    })),
                 }
             };
             () => {
@@ -274,7 +299,18 @@ impl Isa for I8051 {
                         assert!(i != Sfr::PSW as u8);
                         state.set(cx, self.regs.sfr[i as usize], val);
                     }
-                    Operand::Mem(m) => state.set(cx, self.mem, node!(Store(m, val))),
+                    Operand::Mem(mem, addr) => state.set(
+                        cx,
+                        mem,
+                        node!(Store(
+                            MemRef {
+                                mem: state.get(cx, mem),
+                                addr,
+                                size: MemSize::M8,
+                            },
+                            val
+                        )),
+                    ),
                 }
             }};
             ($val:expr) => {
@@ -287,7 +323,7 @@ impl Isa for I8051 {
                 if addr.as_u8() > 0x80 {
                     Operand::Sfr(addr.as_u8() & 0x7f)
                 } else {
-                    Operand::Mem(mem_ref!(cx.a(addr)))
+                    Operand::Mem(self.mem, cx.a(addr))
                 }
             }};
         }
@@ -302,11 +338,14 @@ impl Isa for I8051 {
             } else if (op & 0xf) == 5 {
                 direct!()
             } else {
-                Operand::Mem(mem_ref!(if (op & 0xf) < 8 {
-                    node!(Load(mem_ref!(cx.a(Const::new(B8, (op & 1) as u64)))))
-                } else {
-                    cx.a(Const::new(B8, (op & 7) as u64))
-                }))
+                Operand::Mem(
+                    self.mem,
+                    if (op & 0xf) < 8 {
+                        node!(Load(mem_ref!(cx.a(Const::new(B8, (op & 1) as u64)))))
+                    } else {
+                        cx.a(Const::new(B8, (op & 7) as u64))
+                    },
+                )
             };
 
             match op >> 4 {
@@ -487,7 +526,7 @@ impl Isa for I8051 {
                     operand = if addr > 0x80 {
                         Operand::Sfr((byte << 3) & 0x7f)
                     } else {
-                        Operand::Mem(mem_ref!(cx.a(Const::new(B8, (0x20 + byte) as u64))))
+                        Operand::Mem(self.mem, cx.a(Const::new(B8, (0x20 + byte) as u64)))
                     };
                     bit
                 }};
@@ -593,50 +632,17 @@ impl Isa for I8051 {
                     )
                 }
                 0x73 | 0x83 | 0x93 => {
+                    let base = if op == 0x83 { cx.a(*pc) } else { get_dptr!() };
                     let addr = node!(Int(
                         IntOp::Add,
                         B16,
-                        node!(Int(
-                            IntOp::Or,
-                            B16,
-                            node!(Int(
-                                IntOp::Shl,
-                                B16,
-                                node!(Zext(B16, state.get(cx, self.regs[Sfr::DPH]))),
-                                cx.a(Const::new(B8, 8))
-                            )),
-                            node!(Zext(B16, state.get(cx, self.regs[Sfr::DPL])))
-                        )),
+                        base,
                         node!(Zext(B16, state.get(cx, self.regs[Sfr::A])))
                     ));
                     if op == 0x73 {
                         return jump!(addr);
                     } else {
-                        // HACK(eddyb) lift MOVC only with statically known addresses,
-                        // until proper support is added for Harvard architectures.
-                        if let Some(addr) = cx[addr].as_const() {
-                            state.set(
-                                cx,
-                                self.regs[Sfr::A],
-                                cx.a(rom.load(addr, MemSize::M8).unwrap()),
-                            );
-                        } else {
-                            // HACK(eddyb) this uses a B16 memory address to
-                            // avoid accidentally aliasing B8 memory addresses.
-                            state.set(
-                                cx,
-                                self.regs[Sfr::A],
-                                node!(Load(MemRef {
-                                    mem: state.get(cx, self.mem),
-                                    addr,
-                                    size: MemSize::M8,
-                                })),
-                            );
-                            error!(
-                                "unsupported dynamic MOVC address: {}",
-                                cx.pretty_print(&addr)
-                            );
-                        }
+                        state.set(cx, self.regs[Sfr::A], get!(Operand::Mem(self.rom, addr)));
                     }
                 }
                 0x80 => return jump!(relative_target!()),

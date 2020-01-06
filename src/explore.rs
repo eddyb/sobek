@@ -243,7 +243,13 @@ impl<'a> Explorer<'a> {
         // efficient check (`if let Some(x) = map.get(k) { return x; }`).
         while !self.blocks.contains_key(&bb) {
             let mut state = State::default();
-            let mut pc = Const::new(self.platform.isa().pc_size(), bb.entry_pc);
+            let mut pc = Const::new(
+                self.cx[self.platform.isa().mem_containing_rom()]
+                    .ty
+                    .mem_addr_size()
+                    .unwrap(),
+                bb.entry_pc,
+            );
             let edges = loop {
                 match self
                     .platform
