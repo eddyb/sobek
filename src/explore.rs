@@ -89,7 +89,7 @@ impl INode {
         size: MemSize,
     ) -> INode {
         match cx[self] {
-            Node::InMem => match base.and_then(|base| base.mem) {
+            Node::GlobalIn(g) => match base.and_then(|base| base.globals.get(&g).copied()) {
                 Some(m) => m.subst_reduce_load(cx, rom, None, addr, size),
                 None => {
                     // HACK(eddyb) assume it's from the ROM, if in range of it.
@@ -124,10 +124,10 @@ impl INode {
 impl INode {
     fn subst_reduce(self, cx: &Cx, rom: &dyn Rom, base: Option<&State>) -> Self {
         cx.a(match cx[self] {
-            Node::InReg(r) => {
+            Node::GlobalIn(g) => {
                 return base
-                    .and_then(|base| base.regs.get(&r).copied())
-                    .map_or(self, |v| v.subst_reduce(cx, rom, None))
+                    .and_then(|base| base.globals.get(&g).copied())
+                    .map_or(self, |node| node.subst_reduce(cx, rom, None))
             }
 
             Node::Const(_) => return self,
@@ -144,12 +144,6 @@ impl INode {
             Node::Load(r) => {
                 let addr = r.addr.subst_reduce(cx, rom, base);
                 return r.mem.subst_reduce_load(cx, rom, base, addr, r.size);
-            }
-
-            Node::InMem => {
-                return base
-                    .and_then(|base| base.mem)
-                    .map_or(self, |m| m.subst_reduce(cx, rom, None))
             }
 
             Node::Store(r, x) => Node::Store(
@@ -248,10 +242,7 @@ impl<'a> Explorer<'a> {
         // FIXME(eddyb) clean this up whenever NLL/Polonius can do the
         // efficient check (`if let Some(x) = map.get(k) { return x; }`).
         while !self.blocks.contains_key(&bb) {
-            let mut state = State {
-                mem: Default::default(),
-                regs: Default::default(),
-            };
+            let mut state = State::default();
             let mut pc = Const::new(self.platform.isa().addr_size(), bb.entry_pc);
             let edges = loop {
                 match self

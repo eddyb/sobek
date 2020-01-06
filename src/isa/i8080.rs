@@ -1,6 +1,6 @@
 use crate::ir::{
     BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, IReg, IntOp, MemRef, MemSize, Node, Reg, State, Type,
+    Const, Cx, Edge, Edges, Effect, Global, IGlobal, IntOp, MemRef, MemSize, Node, State, Type,
 };
 use crate::isa::Isa;
 use crate::platform::Rom;
@@ -14,6 +14,7 @@ enum Flavor {
 
 pub struct I8080 {
     flavor: Flavor,
+    mem: IGlobal,
     regs: Regs,
 }
 
@@ -21,6 +22,10 @@ impl I8080 {
     pub fn new(cx: &Cx) -> Self {
         I8080 {
             flavor: Flavor::Intel,
+            mem: cx.a(Global {
+                ty: Type::Mem,
+                name: cx.a("m"),
+            }),
             regs: Regs::new(cx),
         }
     }
@@ -28,32 +33,36 @@ impl I8080 {
     pub fn new_lr35902(cx: &Cx) -> Self {
         I8080 {
             flavor: Flavor::LR35902,
+            mem: cx.a(Global {
+                ty: Type::Mem,
+                name: cx.a("m"),
+            }),
             regs: Regs::new(cx),
         }
     }
 }
 
 struct Regs {
-    a: IReg,
+    a: IGlobal,
 
-    reg16: [IReg; 4],
+    reg16: [IGlobal; 4],
 
     // Flag bits.
-    f_c: IReg,
-    f_h: IReg, // AC on i8080, H on LR35902.
-    f_n: IReg, // Missing on i8080, N on LR35902.
-    f_z: IReg,
-    f_s: IReg, // S on i8080, missing on LR35902.
-    f_p: IReg, // P on i8080, missing on LR35902.
+    f_c: IGlobal,
+    f_h: IGlobal, // AC on i8080, H on LR35902.
+    f_n: IGlobal, // Missing on i8080, N on LR35902.
+    f_z: IGlobal,
+    f_s: IGlobal, // S on i8080, missing on LR35902.
+    f_p: IGlobal, // P on i8080, missing on LR35902.
 
-    ie: IReg, // Interrupt Enable.
+    ie: IGlobal, // Interrupt Enable.
 }
 
 impl Regs {
     fn new(cx: &Cx) -> Self {
         let reg = |size, name| {
-            cx.a(Reg {
-                size,
+            cx.a(Global {
+                ty: Type::Bits(size),
                 name: cx.a(name),
             })
         };
@@ -93,15 +102,15 @@ pub enum Reg16 {
 }
 
 impl Index<Reg16> for Regs {
-    type Output = IReg;
+    type Output = IGlobal;
 
-    fn index(&self, r: Reg16) -> &IReg {
+    fn index(&self, r: Reg16) -> &IGlobal {
         &self.reg16[r as usize]
     }
 }
 
 impl I8080 {
-    fn flags(&self) -> [Result<IReg, u8>; 8] {
+    fn flags(&self) -> [Result<IGlobal, u8>; 8] {
         let Regs {
             f_c,
             f_h,
@@ -188,7 +197,7 @@ impl Isa for I8080 {
                 let addr = $addr;
                 assert_eq!(cx[addr].ty(cx), Type::Bits(B16));
                 MemRef {
-                    mem: state.get_mem(cx),
+                    mem: state.get(cx, self.mem),
                     addr,
                     size: MemSize::$sz,
                 }
@@ -207,8 +216,9 @@ impl Isa for I8080 {
                     cx.a(Const::new(B16, (size.bits() / 8) as u64))
                 ));
                 state.set(cx, self.regs[Reg16::SP], sp);
-                state.set_mem(
+                state.set(
                     cx,
+                    self.mem,
                     node!(Store(
                         match size {
                             B8 => mem_ref!(sp),
@@ -385,8 +395,9 @@ impl Isa for I8080 {
                             ))
                         )),
                     ),
-                    Operand::Mem => state.set_mem(
+                    Operand::Mem => state.set(
                         cx,
+                        self.mem,
                         node!(Store(mem_ref!(state.get(cx, self.regs[Reg16::HL])), val)),
                     ),
                 }
@@ -411,7 +422,11 @@ impl Isa for I8080 {
             match op {
                 0x08 => {
                     let m = mem_ref!(cx.a(imm!(16)), M16);
-                    state.set_mem(cx, node!(Store(m, state.get(cx, self.regs[Reg16::SP]))));
+                    state.set(
+                        cx,
+                        self.mem,
+                        node!(Store(m, state.get(cx, self.regs[Reg16::SP]))),
+                    );
                     return Ok(state);
                 }
                 0x18 => return jump!(relative_target!()),
@@ -452,7 +467,7 @@ impl Isa for I8080 {
                     };
                     let m = mem_ref!(addr);
                     if (op & 0xf0) == 0xe0 {
-                        state.set_mem(cx, node!(Store(m, state.get(cx, self.regs.a))));
+                        state.set(cx, self.mem, node!(Store(m, state.get(cx, self.regs.a))));
                     } else {
                         state.set(cx, self.regs.a, node!(Load(m)));
                     }
@@ -578,7 +593,7 @@ impl Isa for I8080 {
                 let addr = state.get(cx, self.regs.reg16[Reg16::BC as usize + (op >> 4) as usize]);
                 let m = mem_ref!(addr);
                 if (op & 0x0f) == 0x02 {
-                    state.set_mem(cx, node!(Store(m, state.get(cx, self.regs.a))));
+                    state.set(cx, self.mem, node!(Store(m, state.get(cx, self.regs.a))));
                 } else {
                     state.set(cx, self.regs.a, node!(Load(m)));
                 }
@@ -742,8 +757,9 @@ impl Isa for I8080 {
                 state.set(cx, self.regs.a, node!(bit_not(state.get(cx, self.regs.a))));
             }
             0x32 => {
-                state.set_mem(
+                state.set(
                     cx,
+                    self.mem,
                     node!(Store(mem_ref!(cx.a(imm!(16))), state.get(cx, self.regs.a))),
                 );
             }

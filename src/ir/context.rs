@@ -1,4 +1,4 @@
-use crate::ir::{Node, Reg};
+use crate::ir::{Global, Node};
 use elsa::FrozenVec;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -94,7 +94,7 @@ macro_rules! interners {
 
 interners! {
     IStr => str,
-    IReg => Reg,
+    IGlobal => Global,
     INode => Node,
 }
 
@@ -126,25 +126,25 @@ impl fmt::Debug for IStr {
 }
 
 // FIXME(eddyb) automate this away somehow.
-impl AsRef<Self> for Reg {
+impl AsRef<Self> for Global {
     fn as_ref(&self) -> &Self {
         self
     }
 }
 
-impl InternInCx for Reg {
-    type Interned = IReg;
-    fn intern_in_cx(self, cx: &Cx) -> IReg {
-        IReg(cx.interners.IReg.intern(self))
+impl InternInCx for Global {
+    type Interned = IGlobal;
+    fn intern_in_cx(self, cx: &Cx) -> IGlobal {
+        IGlobal(cx.interners.IGlobal.intern(self))
     }
 }
 
-impl fmt::Debug for IReg {
+impl fmt::Debug for IGlobal {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if super::DBG_CX.is_set() {
             super::DBG_CX.with(|cx| write!(f, "{:?}", &cx[*self]))
         } else {
-            write!(f, "reg#{:x}", self.0)
+            write!(f, "global#{:x}", self.0)
         }
     }
 }

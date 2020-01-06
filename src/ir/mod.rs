@@ -2,12 +2,11 @@ use itertools::{Either, Itertools};
 use scoped_tls::scoped_thread_local;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
-use std::iter;
 use std::mem;
 use std::ops::RangeTo;
 
 mod context;
-pub use self::context::{Cx, INode, IReg, IStr, InternInCx};
+pub use self::context::{Cx, IGlobal, INode, IStr, InternInCx};
 
 scoped_thread_local!(static DBG_CX: Cx);
 scoped_thread_local!(static DBG_LOCALS: HashMap<INode, (IStr, usize)>);
@@ -316,18 +315,6 @@ impl IntOp {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub struct Reg {
-    pub size: BitSize,
-    pub name: IStr,
-}
-
-impl fmt::Debug for Reg {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.name)
-    }
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Type {
     Bits(BitSize),
@@ -340,6 +327,18 @@ impl Type {
             Type::Bits(size) => Ok(size),
             _ => Err(self),
         }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub struct Global {
+    pub ty: Type,
+    pub name: IStr,
+}
+
+impl fmt::Debug for Global {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.name)
     }
 }
 
@@ -413,9 +412,9 @@ impl MemRef {
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Node {
-    // Bits nodes.
-    InReg(IReg),
+    GlobalIn(IGlobal),
 
+    // Bits nodes.
     Const(Const),
     Int(IntOp, BitSize, INode, INode),
     Trunc(BitSize, INode),
@@ -425,15 +424,14 @@ pub enum Node {
     Load(MemRef),
 
     // Mem nodes.
-    InMem,
-
     Store(MemRef, INode),
 }
 
 impl fmt::Debug for Node {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Node::InReg(r) => write!(f, "in.{:?}", r),
+            Node::GlobalIn(g) => write!(f, "in.{:?}", g),
+
             Node::Const(c) => c.fmt(f),
             Node::Int(op, size, a, b) => {
                 let get_inline_node = |node: INode| {
@@ -492,7 +490,6 @@ impl fmt::Debug for Node {
             Node::Zext(size, x) => write!(f, "zext{}({:?})", size.bits_subscript(), x),
             Node::Load(r) => write!(f, "{:?}[{:?}]{}", r.mem, r.addr, r.size.bits_subscript()),
 
-            Node::InMem => write!(f, "in.m"),
             Node::Store(r, x) => write!(
                 f,
                 "{:?}[{:?}]{} <- {:?}",
@@ -576,7 +573,8 @@ impl Node {
 
     pub fn ty(&self, cx: &Cx) -> Type {
         match self {
-            Node::InReg(r) => Type::Bits(cx[*r].size),
+            Node::GlobalIn(g) => cx[*g].ty,
+
             Node::Const(c) => Type::Bits(c.size),
 
             Node::Int(IntOp::Eq, _, _, _)
@@ -590,7 +588,7 @@ impl Node {
 
             Node::Load(r) => Type::Bits(r.size.into()),
 
-            Node::InMem | Node::Store(..) => Type::Mem,
+            Node::Store(..) => Type::Mem,
         }
     }
 
@@ -904,7 +902,7 @@ impl Visit for INode {
 impl Visit for Node {
     fn walk(&self, visitor: &mut impl Visitor) {
         match *self {
-            Node::InReg(_) | Node::Const(_) => {}
+            Node::GlobalIn(_) | Node::Const(_) => {}
             Node::Int(_, _, a, b) => {
                 visitor.visit_node(a);
                 visitor.visit_node(b);
@@ -914,7 +912,6 @@ impl Visit for Node {
                 visitor.visit_node(r.mem);
                 visitor.visit_node(r.addr);
             }
-            Node::InMem => {}
             Node::Store(r, x) => {
                 visitor.visit_node(r.mem);
                 visitor.visit_node(r.addr);
@@ -927,7 +924,7 @@ impl Visit for Node {
 impl INode {
     pub fn subst(self, cx: &Cx, base: &State) -> Self {
         cx.a(match cx[self] {
-            Node::InReg(r) => return base.regs.get(&r).copied().unwrap_or(self),
+            Node::GlobalIn(g) => return base.globals.get(&g).copied().unwrap_or(self),
 
             Node::Const(_) => return self,
 
@@ -937,8 +934,6 @@ impl INode {
             Node::Zext(size, x) => Node::Zext(size, x.subst(cx, base)),
 
             Node::Load(r) => Node::Load(r.subst(cx, base)),
-
-            Node::InMem => return base.mem.unwrap_or(self),
 
             Node::Store(r, x) => Node::Store(r.subst(cx, base), x.subst(cx, base)),
         })
@@ -979,43 +974,32 @@ impl Visit for Effect {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Default)]
 pub struct State {
-    pub mem: Option<INode>,
-
-    pub regs: BTreeMap<IReg, INode>,
+    pub globals: BTreeMap<IGlobal, INode>,
 }
 
 impl State {
-    pub fn get_mem(&self, cx: &Cx) -> INode {
-        self.mem.unwrap_or_else(|| cx.a(Node::InMem))
-    }
-
-    pub fn set_mem(&mut self, cx: &Cx, m: INode) {
-        self.mem = if cx[m] != Node::InMem { Some(m) } else { None };
-    }
-
-    pub fn get(&self, cx: &Cx, r: IReg) -> INode {
-        self.regs
-            .get(&r)
+    pub fn get(&self, cx: &Cx, g: IGlobal) -> INode {
+        self.globals
+            .get(&g)
             .copied()
-            .unwrap_or_else(|| cx.a(Node::InReg(r)))
+            .unwrap_or_else(|| cx.a(Node::GlobalIn(g)))
     }
 
-    pub fn set(&mut self, cx: &Cx, r: IReg, v: INode) {
-        if cx[v] != Node::InReg(r) {
-            self.regs.insert(r, v);
+    pub fn set(&mut self, cx: &Cx, g: IGlobal, node: INode) {
+        if cx[node] != Node::GlobalIn(g) {
+            self.globals.insert(g, node);
         } else {
-            self.regs.remove(&r);
+            self.globals.remove(&g);
         }
     }
 }
 
 impl Visit for State {
     fn walk(&self, visitor: &mut impl Visitor) {
-        self.mem.visit(visitor);
-        for &v in self.regs.values() {
-            v.visit(visitor);
+        for &node in self.globals.values() {
+            node.visit(visitor);
         }
     }
 }
@@ -1132,8 +1116,7 @@ impl Cx {
             use_counts: HashMap<INode, usize>,
             numbered_counts: HashMap<IStr, usize>,
             locals: HashMap<INode, (IStr, usize)>,
-            val_to_state_regs: HashMap<INode, Vec<IReg>>,
-            state_mem: Option<INode>,
+            node_to_state_globals: HashMap<INode, Vec<IGlobal>>,
         }
 
         struct UseCounter<'a> {
@@ -1202,7 +1185,7 @@ impl Cx {
                 };
 
                 let inline = match self.cx[node] {
-                    Node::InReg(_) | Node::Const(_) | Node::InMem => true,
+                    Node::GlobalIn(_) | Node::Const(_) => true,
 
                     // `-x` and `!x`.
                     _ if self.cx[node].as_unop(|c| self.cx[c].as_const()).is_some() => true,
@@ -1263,13 +1246,10 @@ impl Cx {
                     }}
                 }
 
-                if let Some(regs) = self.data.val_to_state_regs.get(&node) {
-                    for r in regs {
-                        write_name!("{:?}", r);
+                if let Some(globals) = self.data.node_to_state_globals.get(&node) {
+                    for g in globals {
+                        write_name!("{:?}", g);
                     }
-                }
-                if Some(node) == self.data.state_mem {
-                    write_name!("m");
                 }
 
                 if self.data.locals.contains_key(&node) {
@@ -1287,8 +1267,7 @@ impl Cx {
             use_counts: Default::default(),
             numbered_counts: Default::default(),
             locals: Default::default(),
-            val_to_state_regs: Default::default(),
-            state_mem: None,
+            node_to_state_globals: Default::default(),
         };
 
         let mut use_counter = UseCounter {
@@ -1305,18 +1284,14 @@ impl Cx {
         if has_states {
             let edge_states = edge_states_and_values.map(|(state, _), _| state.unwrap());
 
-            let regs = match edge_states.map(|state, _| state.regs.keys().copied()) {
-                Edges::One(regs) => Either::Left(regs),
+            let globals = match edge_states.map(|state, _| state.globals.keys().copied()) {
+                Edges::One(globals) => Either::Left(globals),
                 Edges::Branch { t, e, .. } => Either::Right(t.merge(e).dedup()),
             };
 
-            let mem_and_regs = iter::once(None).chain(Iterator::map(regs, Some));
-            for maybe_reg in mem_and_regs {
+            for g in globals {
                 let node = edge_states
-                    .map(|state, _| match maybe_reg {
-                        None => state.mem,
-                        Some(r) => state.regs.get(&r).copied(),
-                    })
+                    .map(|state, _| state.globals.get(&g).copied())
                     .merge(|t, e| {
                         if t == e {
                             t
@@ -1328,19 +1303,12 @@ impl Cx {
                 node.visit(&mut use_counter);
 
                 if let Some(node) = node {
-                    match maybe_reg {
-                        None => {
-                            use_counter.data.state_mem = Some(node);
-                        }
-                        Some(r) => {
-                            use_counter
-                                .data
-                                .val_to_state_regs
-                                .entry(node)
-                                .or_default()
-                                .push(r);
-                        }
-                    }
+                    use_counter
+                        .data
+                        .node_to_state_globals
+                        .entry(node)
+                        .or_default()
+                        .push(g);
                 }
             }
         }
@@ -1401,15 +1369,9 @@ impl Cx {
                                  (other_state, _): (Option<&State>, _)| {
                                     assert_eq!(state.is_some(), other_state.is_some());
                                     if let (Some(state), Some(other_state)) = (state, other_state) {
-                                        let m = state.mem;
-                                        if m != other_state.mem {
-                                            if let Some(m) = m {
-                                                writeln!(f, "        m = {:?};", m)?;
-                                            }
-                                        }
-                                        for (r, &v) in &state.regs {
-                                            if other_state.regs.get(r) != Some(&v) {
-                                                writeln!(f, "        {:?} = {:?};", r, v)?;
+                                        for (g, &node) in &state.globals {
+                                            if other_state.globals.get(g) != Some(&node) {
+                                                writeln!(f, "        {:?} = {:?};", g, node)?;
                                             }
                                         }
                                     }

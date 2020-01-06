@@ -1,18 +1,23 @@
 use crate::ir::{
     BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, IReg, IntOp, MemRef, MemSize, Node, Reg, State, Type,
+    Const, Cx, Edge, Edges, Effect, Global, IGlobal, IntOp, MemRef, MemSize, Node, State, Type,
 };
 use crate::isa::Isa;
 use crate::platform::Rom;
 use std::ops::Index;
 
 pub struct I8051 {
+    mem: IGlobal,
     regs: Regs,
 }
 
 impl I8051 {
     pub fn new(cx: &Cx) -> Self {
         I8051 {
+            mem: cx.a(Global {
+                ty: Type::Mem,
+                name: cx.a("m"),
+            }),
             regs: Regs::new(cx),
         }
     }
@@ -22,8 +27,8 @@ struct Regs {
     // FIXME(eddyb) use an array, or separate fields.
     // FIXME(eddyb) don't make every SFR a register, if reads are not
     // "pure", e.g. they interact with I/O, they should use special ops.
-    sfr: Vec<IReg>,
-    psw_c: IReg,
+    sfr: Vec<IGlobal>,
+    psw_c: IGlobal,
 }
 
 enum Sfr {
@@ -37,7 +42,12 @@ enum Sfr {
 
 impl Regs {
     fn new(cx: &Cx) -> Self {
-        let reg = |size, name| cx.a(Reg { size, name });
+        let reg = |size, name| {
+            cx.a(Global {
+                ty: Type::Bits(size),
+                name,
+            })
+        };
 
         Regs {
             sfr: (0..0x80)
@@ -66,9 +76,9 @@ impl Regs {
 }
 
 impl Index<Sfr> for Regs {
-    type Output = IReg;
+    type Output = IGlobal;
 
-    fn index(&self, r: Sfr) -> &IReg {
+    fn index(&self, r: Sfr) -> &IGlobal {
         &self.sfr[r as usize]
     }
 }
@@ -123,7 +133,7 @@ impl Isa for I8051 {
                 let addr = $addr;
                 assert_eq!(cx[addr].ty(cx), Type::Bits(B8));
                 MemRef {
-                    mem: state.get_mem(cx),
+                    mem: state.get(cx, self.mem),
                     addr,
                     size: MemSize::$sz,
                 }
@@ -144,8 +154,9 @@ impl Isa for I8051 {
                     cx.a(Const::new(B8, (size.bits() / 8) as u64))
                 ));
                 state.set(cx, self.regs[Sfr::SP], sp);
-                state.set_mem(
+                state.set(
                     cx,
+                    self.mem,
                     node!(Store(
                         match size {
                             B8 => mem_ref!(sp),
@@ -266,7 +277,7 @@ impl Isa for I8051 {
                         assert!(i != Sfr::PSW as u8);
                         state.set(cx, self.regs.sfr[i as usize], val);
                     }
-                    Operand::Mem(m) => state.set_mem(cx, node!(Store(m, val))),
+                    Operand::Mem(m) => state.set(cx, self.mem, node!(Store(m, val))),
                 }
             }};
             ($val:expr) => {
@@ -619,7 +630,7 @@ impl Isa for I8051 {
                                 cx,
                                 self.regs[Sfr::A],
                                 node!(Load(MemRef {
-                                    mem: state.get_mem(cx),
+                                    mem: state.get(cx, self.mem),
                                     addr,
                                     size: MemSize::M8,
                                 })),

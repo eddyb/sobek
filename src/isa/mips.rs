@@ -1,12 +1,14 @@
 use crate::ir::{
     BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, INode, IReg, IntOp, MemRef, MemSize, Node, State, Type,
+    Const, Cx, Edge, Edges, Effect, Global, IGlobal, INode, IntOp, MemRef, MemSize, Node, State,
+    Type,
 };
 use crate::isa::Isa;
 use crate::platform::Rom;
 use std::ops::Index;
 
 pub struct Mips32 {
+    mem: IGlobal,
     regs32: Regs32,
     regs64_upper: Regs32,
 }
@@ -14,6 +16,10 @@ pub struct Mips32 {
 impl Mips32 {
     pub fn new(cx: &Cx) -> Self {
         Mips32 {
+            mem: cx.a(Global {
+                ty: Type::Mem,
+                name: cx.a("m"),
+            }),
             regs32: Regs32::new(cx, None),
             regs64_upper: Regs32::new(cx, Some("upper")),
         }
@@ -48,16 +54,16 @@ impl Mips32 {
 }
 
 struct Regs32 {
-    gpr: [IReg; 32],
-    lo: IReg,
-    hi: IReg,
+    gpr: [IGlobal; 32],
+    lo: IGlobal,
+    hi: IGlobal,
 }
 
 impl Regs32 {
     fn new(cx: &Cx, suffix: Option<&str>) -> Self {
         let reg = |name| {
-            cx.a(crate::ir::Reg {
-                size: B32,
+            cx.a(Global {
+                ty: Type::Bits(B32),
                 name: match suffix {
                     None => cx.a(name),
                     Some(suffix) => cx.a(&format!("{}.{}", name, suffix)[..]),
@@ -107,9 +113,9 @@ impl From<u32> for Reg {
 }
 
 impl Index<Reg> for Regs32 {
-    type Output = IReg;
+    type Output = IGlobal;
 
-    fn index(&self, r: Reg) -> &IReg {
+    fn index(&self, r: Reg) -> &IGlobal {
         match r {
             Reg::Gpr(i) => &self.gpr[i as usize],
             Reg::Lo => &self.lo,
@@ -506,7 +512,7 @@ impl Isa for Mips32 {
             macro_rules! mem_ref {
                 ($sz:ident) => {
                     MemRef {
-                        mem: state.get_mem(cx),
+                        mem: state.get(cx, self.mem),
                         addr: node!(Int(IntOp::Add, B32, rs, cx.a(imm))),
                         size: MemSize::$sz,
                     }
@@ -561,9 +567,17 @@ impl Isa for Mips32 {
                 36 => state.mips32_set(self, cx, rd, node!(Zext(B32, node!(Load(mem_ref!(M8)))))),
                 37 => state.mips32_set(self, cx, rd, node!(Zext(B32, node!(Load(mem_ref!(M16)))))),
 
-                40 => state.set_mem(cx, node!(Store(mem_ref!(M8), node!(Trunc(B8, rt))))),
-                41 => state.set_mem(cx, node!(Store(mem_ref!(M16), node!(Trunc(B16, rt))))),
-                43 => state.set_mem(cx, node!(Store(mem_ref!(M32), rt))),
+                40 => state.set(
+                    cx,
+                    self.mem,
+                    node!(Store(mem_ref!(M8), node!(Trunc(B8, rt)))),
+                ),
+                41 => state.set(
+                    cx,
+                    self.mem,
+                    node!(Store(mem_ref!(M16), node!(Trunc(B16, rt)))),
+                ),
+                43 => state.set(cx, self.mem, node!(Store(mem_ref!(M32), rt))),
 
                 47 => {
                     // FIXME(eddyb) use the result of rs+imm as an argument.
@@ -601,7 +615,7 @@ impl Isa for Mips32 {
                 }
 
                 55 => set_reg_maybe64!(rd, node!(Load(mem_ref!(M64)))),
-                63 => state.set_mem(cx, node!(Store(mem_ref!(M64), rt))),
+                63 => state.set(cx, self.mem, node!(Store(mem_ref!(M64), rt))),
 
                 _ => error!("unknown opcode 0x{:x} ({0})", op),
             }
