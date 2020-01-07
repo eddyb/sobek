@@ -15,7 +15,7 @@ use std::sync::Arc;
 struct Args {
     /// Platform to analyze for.
     #[structopt(short, long, name = "PLATFORM")]
-    platform: String,
+    platform: Option<String>,
 
     /// ROM file.
     #[structopt(parse(from_os_str), name = "ROM")]
@@ -77,7 +77,11 @@ fn analyze_and_dump<I: Isa>(
 #[paw::main]
 fn main(args: Args) {
     let data = std::fs::read(&args.rom).unwrap();
-    match &args.platform[..] {
+    let platform = match &args.platform {
+        Some(p) => &p[..],
+        None => panic!("unable auto-detect platform (NYI)"),
+    };
+    match platform {
         "8051" => {
             analyze_and_dump(
                 I8051::new,
@@ -118,6 +122,6 @@ fn main(args: Args) {
             let entry_pc = rom.base;
             analyze_and_dump(Mips32::new, rom, iter::once(entry_pc));
         }
-        _ => panic!("unsupported platform `{}`", args.platform),
+        _ => panic!("unsupported platform `{}`", platform),
     }
 }
