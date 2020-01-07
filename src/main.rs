@@ -25,7 +25,7 @@ fn analyze_and_dump<I: Isa>(
     let ctrcc_result = {
         let cancel_token = cancel_token.clone();
         ctrlc::set_handler(move || {
-            eprintln!("Ctrl-C: cancelling...");
+            eprintln!("  (Ctrl-C: cancelling...)");
             cancel_token.store(true, Ordering::SeqCst);
         })
     };

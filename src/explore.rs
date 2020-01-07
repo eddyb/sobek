@@ -5,8 +5,10 @@ use crate::ir::{
 use crate::platform::Platform;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
+use std::io::Write;
+use std::mem;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::{fmt, mem};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Set1<T> {
@@ -221,7 +223,19 @@ pub struct Explorer<'a> {
 
     cancel_token: Option<&'a AtomicBool>,
 
+    status_term: Option<Box<term::StderrTerminal>>,
+
     exit_cache: HashMap<(BlockId, ExitOptions), Exit>,
+}
+
+impl Drop for Explorer<'_> {
+    fn drop(&mut self) {
+        if let Some(term) = &mut self.status_term {
+            let _ = term.reset();
+            let _ = writeln!(term.get_mut(), "");
+            let _ = term.get_mut().flush();
+        }
+    }
 }
 
 impl<'a> Explorer<'a> {
@@ -237,6 +251,7 @@ impl<'a> Explorer<'a> {
             takes_static_continuation: HashSet::new(),
             eventual_static_continuation: HashMap::new(),
             cancel_token,
+            status_term: term::stderr(),
             exit_cache: HashMap::new(),
         }
     }
@@ -293,8 +308,22 @@ impl<'a> Explorer<'a> {
             }
 
             self.blocks.insert(bb, Block { pc: ..pc, edges });
+
+            if let Some(term) = &mut self.status_term {
+                if term.carriage_return().is_ok() && term.delete_line().is_ok() {
+                    let _ = write!(
+                        term.get_mut(),
+                        "Last lifted block: {:?} | Total found blocks: {}",
+                        bb,
+                        self.blocks.len()
+                    );
+                    let _ = term.get_mut().flush();
+                }
+            }
+
             break;
         }
+
         &self.blocks[&bb]
     }
 
