@@ -7,8 +7,20 @@ use sobek::isa::Isa;
 use sobek::platform::n64;
 use sobek::platform::{RawRom, Rom, SimplePlatform};
 use std::iter;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+#[derive(structopt::StructOpt)]
+struct Args {
+    /// Platform to analyze for.
+    #[structopt(short, long, name = "PLATFORM")]
+    platform: String,
+
+    /// ROM file.
+    #[structopt(parse(from_os_str), name = "ROM")]
+    rom: PathBuf,
+}
 
 fn analyze_and_dump<I: Isa>(
     mk_isa: impl FnOnce(&Cx) -> I,
@@ -62,12 +74,10 @@ fn analyze_and_dump<I: Isa>(
     }
 }
 
-fn main() {
-    // FIXME(eddyb) switch to `structopt`.
-    let isa = std::env::args().nth(1).unwrap();
-    let path = std::env::args().nth(2).unwrap();
-    let data = std::fs::read(path).unwrap();
-    match &isa[..] {
+#[paw::main]
+fn main(args: Args) {
+    let data = std::fs::read(&args.rom).unwrap();
+    match &args.platform[..] {
         "8051" => {
             analyze_and_dump(
                 I8051::new,
@@ -108,6 +118,6 @@ fn main() {
             let entry_pc = rom.base;
             analyze_and_dump(Mips32::new, rom, iter::once(entry_pc));
         }
-        _ => panic!("unsupport isa {:?}", isa),
+        _ => panic!("unsupported platform `{}`", args.platform),
     }
 }
