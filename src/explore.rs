@@ -371,35 +371,30 @@ impl<'a> Explorer<'a> {
         options: ExitOptions,
         br_cond: Option<bool>,
     ) -> Exit {
-        let mut exit = match self
-            .get_or_lift_block(bb)
-            .edges
-            .as_ref()
-            .get(br_cond)
-            .effect
-        {
-            Effect::Jump(direct_target)
-            | Effect::Opaque {
-                next_pc: direct_target,
-                ..
-            } => Exit {
-                targets: Set1::One(direct_target.subst_reduce(self, None)),
-                arg_values: options.arg_value.map_or(Set1::Empty, |arg_value| {
-                    Set1::One(arg_value.subst_reduce(
-                        self,
-                        Some(&self.blocks[&bb].edges.as_ref().get(br_cond).state),
-                    ))
-                }),
-                partial: None,
-            },
-            Effect::Error(_) => {
-                return Exit {
-                    targets: Set1::Empty,
-                    arg_values: Set1::Empty,
+        let mut exit =
+            match self.get_or_lift_block(bb).edges.as_ref()[br_cond].effect {
+                Effect::Jump(direct_target)
+                | Effect::Opaque {
+                    next_pc: direct_target,
+                    ..
+                } => Exit {
+                    targets: Set1::One(direct_target.subst_reduce(self, None)),
+                    arg_values: options.arg_value.map_or(Set1::Empty, |arg_value| {
+                        Set1::One(arg_value.subst_reduce(
+                            self,
+                            Some(&self.blocks[&bb].edges.as_ref()[br_cond].state),
+                        ))
+                    }),
                     partial: None,
+                },
+                Effect::Error(_) => {
+                    return Exit {
+                        targets: Set1::Empty,
+                        arg_values: Set1::Empty,
+                        partial: None,
+                    }
                 }
-            }
-        };
+            };
 
         // HACK(eddyb) this uses a stack of targets to be able to handle a chain
         // of exit continuations, all resolved by `bb` simultaneously.
@@ -467,7 +462,7 @@ impl<'a> Explorer<'a> {
                     values.map(|arg_value| {
                         arg_value.subst_reduce(
                             self,
-                            Some(&self.blocks[&bb].edges.as_ref().get(br_cond).state),
+                            Some(&self.blocks[&bb].edges.as_ref()[br_cond].state),
                         )
                     })
                 })

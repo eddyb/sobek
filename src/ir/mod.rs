@@ -3,7 +3,7 @@ use scoped_tls::scoped_thread_local;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::mem;
-use std::ops::RangeTo;
+use std::ops::{Index, IndexMut, RangeTo};
 
 mod context;
 pub use self::context::{Cx, IGlobal, INode, IStr, InternInCx};
@@ -1075,7 +1075,23 @@ impl<T> Edges<T> {
             Edges::Branch { t, e, .. } => f(t, e),
         }
     }
-    pub fn get(self, br_cond: Option<bool>) -> T {
+}
+
+impl<T> Index<Option<bool>> for Edges<T> {
+    type Output = T;
+
+    fn index(&self, br_cond: Option<bool>) -> &T {
+        match (self, br_cond) {
+            (Edges::One(x), None) => x,
+            (Edges::Branch { t, .. }, Some(true)) => t,
+            (Edges::Branch { e, .. }, Some(false)) => e,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl<T> IndexMut<Option<bool>> for Edges<T> {
+    fn index_mut(&mut self, br_cond: Option<bool>) -> &mut T {
         match (self, br_cond) {
             (Edges::One(x), None) => x,
             (Edges::Branch { t, .. }, Some(true)) => t,
