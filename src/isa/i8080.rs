@@ -240,7 +240,7 @@ impl Isa for I8080 {
                         IntOp::Add,
                         B16,
                         sp,
-                        cx.a(Const::new(B16, (MemSize::$sz.bits() / 8) as u64))
+                        cx.a(Const::new(B16, MemSize::$sz.bytes() as u64))
                     )),
                 );
                 value

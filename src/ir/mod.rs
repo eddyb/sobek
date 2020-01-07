@@ -369,21 +369,12 @@ impl Into<BitSize> for MemSize {
 }
 
 impl MemSize {
-    pub fn bits(self) -> u8 {
+    pub fn bytes(self) -> u8 {
         match self {
-            MemSize::M8 => 8,
-            MemSize::M16 => 16,
-            MemSize::M32 => 32,
-            MemSize::M64 => 64,
-        }
-    }
-
-    pub fn bits_subscript(self) -> &'static str {
-        match self {
-            MemSize::M8 => "₈",
-            MemSize::M16 => "₁₆",
-            MemSize::M32 => "₃₂",
-            MemSize::M64 => "₆₄",
+            MemSize::M8 => 1,
+            MemSize::M16 => 2,
+            MemSize::M32 => 4,
+            MemSize::M64 => 8,
         }
     }
 }
@@ -402,7 +393,7 @@ impl fmt::Debug for MemRef {
             "{:?}[{:?}]{}",
             self.mem,
             self.addr,
-            self.size.bits_subscript()
+            BitSize::bits_subscript(self.size.into())
         )
     }
 }
@@ -495,16 +486,9 @@ impl fmt::Debug for Node {
             Node::Trunc(size, x) => write!(f, "trunc{}({:?})", size.bits_subscript(), x),
             Node::Sext(size, x) => write!(f, "sext{}({:?})", size.bits_subscript(), x),
             Node::Zext(size, x) => write!(f, "zext{}({:?})", size.bits_subscript(), x),
-            Node::Load(r) => write!(f, "{:?}[{:?}]{}", r.mem, r.addr, r.size.bits_subscript()),
+            Node::Load(r) => write!(f, "{:?}", r),
 
-            Node::Store(r, x) => write!(
-                f,
-                "{:?}[{:?}]{} <- {:?}",
-                r.mem,
-                r.addr,
-                r.size.bits_subscript(),
-                x
-            ),
+            Node::Store(r, x) => write!(f, "{:?} <- {:?}", r, x),
         }
     }
 }

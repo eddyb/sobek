@@ -21,7 +21,7 @@ impl<T: Deref<Target = [u8]>> Rom for RawRom<T> {
         let err = UnsupportedAddress(addr);
         let addr = addr.as_u64();
         if addr >= self.data.len() as u64
-            || addr + (size.bits() / 8 - 1) as u64 >= self.data.len() as u64
+            || addr + (size.bytes() - 1) as u64 >= self.data.len() as u64
         {
             return Err(err);
         }

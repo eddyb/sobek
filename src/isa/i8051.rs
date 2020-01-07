@@ -185,7 +185,7 @@ impl Isa for I8051 {
                     self.regs[Sfr::SP],
                     node!(int_sub(
                         sp,
-                        cx.a(Const::new(B8, (MemSize::$sz.bits() / 8) as u64))
+                        cx.a(Const::new(B8, MemSize::$sz.bytes() as u64))
                     )),
                 );
                 value
