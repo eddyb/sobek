@@ -7,9 +7,31 @@ use sobek::isa::Isa;
 use sobek::platform::n64;
 use sobek::platform::{RawRom, Rom, SimplePlatform};
 use std::iter;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+// FIXME(eddyb) better error types.
+fn parse_addr(s: &str) -> Result<u64, String> {
+    if s.starts_with("0x") {
+        let s = &s[2..];
+        // FIXME(eddyb) make this cheaper somehow.
+        let s = &s.replace('_', "");
+        u64::from_str_radix(s, 16).map_err(|e| e.to_string())
+    } else {
+        Err("addresses must start with `0x`".to_string())
+    }
+}
+
+// FIXME(eddyb) better error types.
+fn parse_addr_range(s: &str) -> Result<Range<u64>, String> {
+    let mut parts = s.split("..");
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(start), Some(end), None) => Ok(parse_addr(start)?..parse_addr(end)?),
+        _ => Err("address ranges must be `start..end`".to_string()),
+    }
+}
 
 #[derive(structopt::StructOpt)]
 struct Args {
@@ -17,12 +39,18 @@ struct Args {
     #[structopt(short, long, name = "PLATFORM")]
     platform: Option<String>,
 
+    /// Memory range to treat as an array.
+    #[structopt(short, long, name = "ARRAY")]
+    #[structopt(number_of_values(1), parse(try_from_str = parse_addr_range))]
+    array: Vec<Range<u64>>,
+
     /// ROM file.
     #[structopt(parse(from_os_str), name = "ROM")]
     rom: PathBuf,
 }
 
 fn analyze_and_dump<I: Isa>(
+    args: &Args,
     mk_isa: impl FnOnce(&Cx) -> I,
     rom: impl Rom,
     entries: impl Iterator<Item = Const>,
@@ -48,6 +76,13 @@ fn analyze_and_dump<I: Isa>(
     let cancel_token = ctrcc_result.ok().map(|_| &*cancel_token);
 
     let mut explorer = Explorer::new(&cx, &platform, cancel_token);
+
+    for array in &args.array {
+        explorer
+            .array_len
+            .insert(array.start, array.end - array.start);
+    }
+
     for entry_pc in entries {
         explorer.explore_bbs(entry_pc);
     }
@@ -84,6 +119,7 @@ fn main(args: Args) {
     match platform {
         "8051" => {
             analyze_and_dump(
+                &args,
                 I8051::new,
                 RawRom {
                     big_endian: false,
@@ -94,6 +130,7 @@ fn main(args: Args) {
         }
         "8080" => {
             analyze_and_dump(
+                &args,
                 I8080::new,
                 RawRom {
                     big_endian: false,
@@ -104,6 +141,7 @@ fn main(args: Args) {
         }
         "gb" => {
             analyze_and_dump(
+                &args,
                 I8080::new_lr35902,
                 RawRom {
                     big_endian: false,
@@ -120,7 +158,7 @@ fn main(args: Args) {
                 data,
             });
             let entry_pc = rom.base;
-            analyze_and_dump(Mips32::new, rom, iter::once(entry_pc));
+            analyze_and_dump(&args, Mips32::new, rom, iter::once(entry_pc));
         }
         _ => panic!("unsupported platform `{}`", platform),
     }

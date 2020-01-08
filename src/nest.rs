@@ -1,7 +1,8 @@
 use crate::explore::{BlockId, Explorer};
-use crate::ir::{Const, Edges, Effect, Node, Visit, Visitor};
+use crate::ir::{Const, Edges, Node, Visit, Visitor};
 use elsa::FrozenMap;
-use std::collections::{BTreeMap, HashMap};
+use itertools::{Either, Itertools};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{self, Write};
 use std::mem;
 use std::ops::RangeTo;
@@ -17,33 +18,48 @@ struct NestedBlock {
 pub struct Nester<'a> {
     pub explorer: &'a Explorer<'a>,
     ref_counts: HashMap<BlockId, usize>,
+    function_like: HashSet<BlockId>,
 
     nested_block_cache: FrozenMap<BlockId, Box<NestedBlock>>,
 }
 
 impl<'a> Nester<'a> {
     pub fn new(explorer: &'a Explorer<'a>) -> Self {
+        // HACK(eddyb) only consider blocks to be function entry points if the
+        // presumed return continuation immediatelly follows the caller block.
+        let function_like = explorer
+            .takes_static_continuation
+            .iter()
+            .filter(|&(&_, callers)| {
+                callers.iter().any(|caller_bb| {
+                    explorer
+                        .eventual_static_continuation
+                        .get(&caller_bb)
+                        .map_or(false, |&ret_bb| {
+                            ret_bb == BlockId::from(explorer.blocks[&caller_bb].pc.end)
+                        })
+                })
+            })
+            .map(|(&callee_bb, _)| callee_bb)
+            .collect();
+
         let mut nester = Nester {
             explorer,
             ref_counts: HashMap::new(),
+            function_like,
             nested_block_cache: FrozenMap::new(),
         };
 
         let mut refcount_target = |target| {
             *nester.ref_counts.entry(target).or_default() += 1;
         };
-        for (&bb, block) in &explorer.blocks {
-            block.edges.as_ref().map(|e, _| match e.effect {
-                Effect::Jump(target)
-                | Effect::Opaque {
-                    next_pc: target, ..
-                } => {
-                    if let Some(target) = explorer.cx[target].as_const().map(BlockId::from) {
-                        refcount_target(target);
-                    }
+        for &bb in explorer.blocks.keys() {
+            explorer.get_block_direct_targets(bb).map(|targets, _| {
+                for target in targets.into_iter() {
+                    refcount_target(target);
                 }
-                Effect::Error(_) => {}
             });
+
             if let Some(&target_bb) = explorer.eventual_static_continuation.get(&bb) {
                 refcount_target(target_bb);
             }
@@ -59,24 +75,13 @@ impl<'a> Nester<'a> {
 
         let block = &self.explorer.blocks[&bb];
 
-        let edge_targets = block.edges.as_ref().map(|e, _| match e.effect {
-            Effect::Jump(target)
-            | Effect::Opaque {
-                next_pc: target, ..
-            } => self.explorer.cx[target].as_const().map(BlockId::from),
-            Effect::Error(_) => None,
-        });
+        let edge_targets = self
+            .explorer
+            .get_block_direct_targets(bb)
+            .map(|targets, br_cond| targets.into_iter().map(move |target| (target, br_cond)));
         let edge_targets = match edge_targets {
-            Edges::One(target) => [target.map(|x| (x, None)), None],
-            Edges::Branch { cond: _, t, e } => {
-                let t = t.map(|x| (x, Some(true)));
-                let e = e.map(|x| (x, Some(false)));
-                if t < e {
-                    [t, e]
-                } else {
-                    [e, t]
-                }
-            }
+            Edges::One(targets) => Either::Left(targets),
+            Edges::Branch { t, e, .. } => Either::Right(t.merge(e)),
         };
 
         let mut pc = block.pc;
@@ -84,10 +89,10 @@ impl<'a> Nester<'a> {
         let mut per_edge_child = [None, None];
         let mut static_exits = BTreeMap::new();
 
-        for (target, br_cond) in edge_targets.iter().copied().flatten() {
+        for (target, br_cond) in edge_targets {
             // Don't nest jumps to targets that look like functions, and don't
             // even include them in `static_exits`.
-            if self.explorer.takes_static_continuation.contains(&target) {
+            if self.function_like.contains(&target) {
                 continue;
             }
 
@@ -108,12 +113,15 @@ impl<'a> Nester<'a> {
             for (&child_exit, &count) in &child.static_exits {
                 *static_exits.entry(child_exit).or_default() += count;
             }
-            match br_cond {
-                Some(i) => {
-                    assert!(per_edge_child[i as usize].replace(target).is_none());
+
+            if let Some(i) = br_cond {
+                if per_edge_child[i as usize].is_none() {
+                    per_edge_child[i as usize] = Some(target);
+                    continue;
                 }
-                None => children.push(target),
             }
+
+            children.push(target);
         }
 
         // Include any targets that could be the return from a call.
@@ -147,7 +155,7 @@ impl<'a> Nester<'a> {
             }
 
             // Don't nest exit targets that look like functions.
-            if self.explorer.takes_static_continuation.contains(&next_bb) {
+            if self.function_like.contains(&next_bb) {
                 break;
             }
 
