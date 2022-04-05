@@ -11,12 +11,24 @@ pub trait Rom {
     fn load(&self, addr: Const, size: MemSize) -> Result<Const, UnsupportedAddress>;
 }
 
-pub struct RawRom<T> {
-    pub big_endian: bool,
+pub struct RawRom<
+    // FIXME(eddyb) use an `enum` when they're allowed in const generics on stable.
+    const BIG_ENDIAN: bool,
+    T,
+> {
     pub data: T,
 }
 
-impl<T: Deref<Target = [u8]>> Rom for RawRom<T> {
+impl<const BIG_ENDIAN: bool, T> From<T> for RawRom<BIG_ENDIAN, T> {
+    fn from(data: T) -> Self {
+        Self { data }
+    }
+}
+
+pub type RawRomLe<T> = RawRom<false, T>;
+pub type RawRomBe<T> = RawRom<true, T>;
+
+impl<const BIG_ENDIAN: bool, T: Deref<Target = [u8]>> Rom for RawRom<BIG_ENDIAN, T> {
     fn load(&self, addr: Const, size: MemSize) -> Result<Const, UnsupportedAddress> {
         let err = UnsupportedAddress(addr);
         let addr = addr.as_u64();
@@ -36,7 +48,7 @@ impl<T: Deref<Target = [u8]>> Rom for RawRom<T> {
                 let bytes = [b(0), b(1)];
                 Const::new(
                     BitSize::B16,
-                    if self.big_endian {
+                    if BIG_ENDIAN {
                         u16::from_be_bytes(bytes)
                     } else {
                         u16::from_le_bytes(bytes)
@@ -49,7 +61,7 @@ impl<T: Deref<Target = [u8]>> Rom for RawRom<T> {
                 let bytes = [b(0), b(1), b(2), b(3)];
                 Const::new(
                     BitSize::B32,
-                    if self.big_endian {
+                    if BIG_ENDIAN {
                         u32::from_be_bytes(bytes)
                     } else {
                         u32::from_le_bytes(bytes)
@@ -62,7 +74,7 @@ impl<T: Deref<Target = [u8]>> Rom for RawRom<T> {
                 let bytes = [b(0), b(1), b(2), b(3), b(4), b(5), b(6), b(7)];
                 Const::new(
                     BitSize::B64,
-                    if self.big_endian {
+                    if BIG_ENDIAN {
                         u64::from_be_bytes(bytes)
                     } else {
                         u64::from_le_bytes(bytes)

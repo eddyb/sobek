@@ -1,14 +1,15 @@
 use crate::ir::{BitSize, Const, MemSize};
 use crate::isa::mips::{AddrSpace, Mips32};
-use crate::platform::{RawRom, Rom, SimplePlatform, UnsupportedAddress};
+use crate::platform::{RawRomBe, Rom, SimplePlatform, UnsupportedAddress};
 
 pub struct Cartridge {
-    pub raw: RawRom<Vec<u8>>,
+    // FIXME(eddyb) should this support little-endian `N64` ROMs as well?
+    pub raw: RawRomBe<Vec<u8>>,
     pub base: Const,
 }
 
 impl Cartridge {
-    pub fn new(raw: RawRom<Vec<u8>>) -> Self {
+    pub fn new(raw: RawRomBe<Vec<u8>>) -> Self {
         let base = raw.load(Const::new(BitSize::B32, 8), MemSize::M32).unwrap();
         Cartridge { raw, base }
     }

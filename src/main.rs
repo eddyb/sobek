@@ -5,7 +5,7 @@ use sobek::isa::i8080::I8080;
 use sobek::isa::mips::Mips32;
 use sobek::isa::Isa;
 use sobek::platform::n64;
-use sobek::platform::{RawRom, Rom, SimplePlatform};
+use sobek::platform::{RawRomLe, Rom, SimplePlatform};
 use std::iter;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -121,10 +121,7 @@ fn main(args: Args) {
             analyze_and_dump(
                 &args,
                 I8051::new,
-                RawRom {
-                    big_endian: false,
-                    data,
-                },
+                RawRomLe::from(data),
                 iter::once(Const::new(BitSize::B16, 0)),
             );
         }
@@ -132,10 +129,7 @@ fn main(args: Args) {
             analyze_and_dump(
                 &args,
                 I8080::new,
-                RawRom {
-                    big_endian: false,
-                    data,
-                },
+                RawRomLe::from(data),
                 iter::once(Const::new(BitSize::B16, 0)),
             );
         }
@@ -143,20 +137,14 @@ fn main(args: Args) {
             analyze_and_dump(
                 &args,
                 I8080::new_lr35902,
-                RawRom {
-                    big_endian: false,
-                    data,
-                },
+                RawRomLe::from(data),
                 iter::once(0x100)
                     .chain((0..5).map(|i| 0x40 + i * 8))
                     .map(|x| Const::new(BitSize::B16, x)),
             );
         }
         "n64" => {
-            let rom = n64::Cartridge::new(RawRom {
-                big_endian: true,
-                data,
-            });
+            let rom = n64::Cartridge::new(data.into());
             let entry_pc = rom.base;
             analyze_and_dump(&args, Mips32::new, rom, iter::once(entry_pc));
         }
