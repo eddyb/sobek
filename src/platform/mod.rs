@@ -1,6 +1,6 @@
 pub mod n64;
 
-use crate::ir::{BitSize, Const, MemSize};
+use crate::ir::{Const, MemSize};
 use crate::isa::Isa;
 use std::ops::Deref;
 
@@ -32,56 +32,33 @@ impl<const BIG_ENDIAN: bool, T: Deref<Target = [u8]>> Rom for RawRom<BIG_ENDIAN,
     fn load(&self, addr: Const, size: MemSize) -> Result<Const, UnsupportedAddress> {
         let err = UnsupportedAddress(addr);
         let addr = addr.as_u64();
-        if addr >= self.data.len() as u64
-            || addr + (size.bytes() - 1) as u64 >= self.data.len() as u64
-        {
-            return Err(err);
+        let bytes = usize::try_from(addr)
+            .ok()
+            .and_then(|addr| self.data.get(addr..)?.get(..usize::from(size.bytes())))
+            .ok_or(err)?;
+
+        macro_rules! from_bytes {
+            ($uint:ty) => {{
+                assert_eq!(addr & (size.bytes() - 1) as u64, 0);
+
+                let &bytes = bytes.try_into().unwrap();
+
+                (if BIG_ENDIAN {
+                    <$uint>::from_be_bytes(bytes)
+                } else {
+                    <$uint>::from_le_bytes(bytes)
+                } as u64)
+            }};
         }
-        let b = |i| self.data[addr as usize + i];
-
-        // FIXME(eddyb) deduplicate these if possible.
-        Ok(match size {
-            MemSize::M8 => Const::new(BitSize::B8, b(0) as u64),
-            MemSize::M16 => {
-                assert_eq!(addr & 1, 0);
-
-                let bytes = [b(0), b(1)];
-                Const::new(
-                    BitSize::B16,
-                    if BIG_ENDIAN {
-                        u16::from_be_bytes(bytes)
-                    } else {
-                        u16::from_le_bytes(bytes)
-                    } as u64,
-                )
-            }
-            MemSize::M32 => {
-                assert_eq!(addr & 3, 0);
-
-                let bytes = [b(0), b(1), b(2), b(3)];
-                Const::new(
-                    BitSize::B32,
-                    if BIG_ENDIAN {
-                        u32::from_be_bytes(bytes)
-                    } else {
-                        u32::from_le_bytes(bytes)
-                    } as u64,
-                )
-            }
-            MemSize::M64 => {
-                assert_eq!(addr & 7, 0);
-
-                let bytes = [b(0), b(1), b(2), b(3), b(4), b(5), b(6), b(7)];
-                Const::new(
-                    BitSize::B64,
-                    if BIG_ENDIAN {
-                        u64::from_be_bytes(bytes)
-                    } else {
-                        u64::from_le_bytes(bytes)
-                    },
-                )
-            }
-        })
+        Ok(Const::new(
+            size.into(),
+            match size {
+                MemSize::M8 => bytes[0] as u64,
+                MemSize::M16 => from_bytes!(u16),
+                MemSize::M32 => from_bytes!(u32),
+                MemSize::M64 => from_bytes!(u64),
+            },
+        ))
     }
 }
 
