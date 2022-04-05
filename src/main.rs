@@ -1,12 +1,11 @@
 use sobek::explore::Explorer;
-use sobek::ir::{BitSize, Const, Cx};
+use sobek::ir::{Const, Cx};
 use sobek::isa::i8051::I8051;
 use sobek::isa::i8080::I8080;
 use sobek::isa::mips::Mips32;
 use sobek::isa::Isa;
 use sobek::platform::n64;
 use sobek::platform::{RawRomBe, RawRomLe, Rom, SimplePlatform};
-use std::iter;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,6 +38,11 @@ struct Args {
     #[structopt(short, long, name = "PLATFORM")]
     platform: Option<String>,
 
+    /// Additional entrypoint.
+    #[structopt(short, long, name = "ENTRY")]
+    #[structopt(number_of_values(1), parse(try_from_str = parse_addr))]
+    entry: Vec<u64>,
+
     /// Memory range to treat as an array.
     #[structopt(short, long, name = "ARRAY")]
     #[structopt(number_of_values(1), parse(try_from_str = parse_addr_range))]
@@ -49,17 +53,17 @@ struct Args {
     rom: PathBuf,
 }
 
-fn analyze_and_dump<I: Isa>(
-    args: &Args,
-    mk_isa: impl FnOnce(&Cx) -> I,
-    rom: impl Rom,
-    entries: impl Iterator<Item = Const>,
-) {
+fn analyze_and_dump<I: Isa>(mut args: Args, mk_isa: impl FnOnce(&Cx) -> I, rom: impl Rom) {
     let cx = Cx::new();
     let platform = SimplePlatform {
         isa: mk_isa(&cx),
         rom,
     };
+
+    let rom_addr_size = cx[platform.isa.mem_containing_rom()]
+        .ty
+        .mem_addr_size()
+        .unwrap();
 
     let cancel_token = Arc::new(AtomicBool::new(false));
     let ctrcc_result = {
@@ -83,8 +87,9 @@ fn analyze_and_dump<I: Isa>(
             .insert(array.start, array.end - array.start);
     }
 
-    for entry_pc in entries {
-        explorer.explore_bbs(entry_pc);
+    args.entry.sort();
+    for &entry_pc in &args.entry {
+        explorer.explore_bbs(Const::new(rom_addr_size, entry_pc));
     }
 
     explorer.split_overlapping_bbs();
@@ -92,10 +97,7 @@ fn analyze_and_dump<I: Isa>(
     let nester = sobek::nest::Nester::new(&explorer);
 
     let mut nested_pc = ..Const::new(
-        cx[platform.isa.mem_containing_rom()]
-            .ty
-            .mem_addr_size()
-            .unwrap(),
+        rom_addr_size,
         explorer.blocks.keys().next().unwrap().entry_pc,
     );
     let mut last_end = nested_pc.end.as_u64();
@@ -110,42 +112,31 @@ fn analyze_and_dump<I: Isa>(
 }
 
 #[paw::main]
-fn main(args: Args) -> std::io::Result<()> {
+fn main(mut args: Args) -> std::io::Result<()> {
+    // FIXME(eddyb) don't default to an endianness here.
+    let rom = RawRomLe::mmap_file(&args.rom)?;
     let platform = match &args.platform {
         Some(p) => &p[..],
         None => panic!("unable auto-detect platform (NYI)"),
     };
     match platform {
         "8051" => {
-            analyze_and_dump(
-                &args,
-                I8051::new,
-                RawRomLe::mmap_file(&args.rom)?,
-                iter::once(Const::new(BitSize::B16, 0)),
-            );
+            args.entry.push(0);
+            analyze_and_dump(args, I8051::new, rom);
         }
         "8080" => {
-            analyze_and_dump(
-                &args,
-                I8080::new,
-                RawRomLe::mmap_file(&args.rom)?,
-                iter::once(Const::new(BitSize::B16, 0)),
-            );
+            args.entry.push(0);
+            analyze_and_dump(args, I8080::new, rom);
         }
         "gb" => {
-            analyze_and_dump(
-                &args,
-                I8080::new_lr35902,
-                RawRomLe::mmap_file(&args.rom)?,
-                iter::once(0x100)
-                    .chain((0..5).map(|i| 0x40 + i * 8))
-                    .map(|x| Const::new(BitSize::B16, x)),
-            );
+            args.entry.push(0x100);
+            args.entry.extend((0..5).map(|i| 0x40 + i * 8));
+            analyze_and_dump(args, I8080::new_lr35902, rom);
         }
         "n64" => {
-            let rom = n64::Cartridge::new(RawRomBe::mmap_file(&args.rom)?);
-            let entry_pc = rom.base;
-            analyze_and_dump(&args, Mips32::new, rom, iter::once(entry_pc));
+            let rom = n64::Cartridge::new(RawRomBe { data: rom.data });
+            args.entry.push(rom.base.as_u64());
+            analyze_and_dump(args, Mips32::new, rom);
         }
         _ => panic!("unsupported platform `{}`", platform),
     }
