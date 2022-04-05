@@ -5,7 +5,7 @@ use sobek::isa::i8080::I8080;
 use sobek::isa::mips::Mips32;
 use sobek::isa::Isa;
 use sobek::platform::n64;
-use sobek::platform::{RawRomLe, Rom, SimplePlatform};
+use sobek::platform::{RawRomBe, RawRomLe, Rom, SimplePlatform};
 use std::iter;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -110,8 +110,7 @@ fn analyze_and_dump<I: Isa>(
 }
 
 #[paw::main]
-fn main(args: Args) {
-    let data = std::fs::read(&args.rom).unwrap();
+fn main(args: Args) -> std::io::Result<()> {
     let platform = match &args.platform {
         Some(p) => &p[..],
         None => panic!("unable auto-detect platform (NYI)"),
@@ -121,7 +120,7 @@ fn main(args: Args) {
             analyze_and_dump(
                 &args,
                 I8051::new,
-                RawRomLe::from(data),
+                RawRomLe::mmap_file(&args.rom)?,
                 iter::once(Const::new(BitSize::B16, 0)),
             );
         }
@@ -129,7 +128,7 @@ fn main(args: Args) {
             analyze_and_dump(
                 &args,
                 I8080::new,
-                RawRomLe::from(data),
+                RawRomLe::mmap_file(&args.rom)?,
                 iter::once(Const::new(BitSize::B16, 0)),
             );
         }
@@ -137,17 +136,18 @@ fn main(args: Args) {
             analyze_and_dump(
                 &args,
                 I8080::new_lr35902,
-                RawRomLe::from(data),
+                RawRomLe::mmap_file(&args.rom)?,
                 iter::once(0x100)
                     .chain((0..5).map(|i| 0x40 + i * 8))
                     .map(|x| Const::new(BitSize::B16, x)),
             );
         }
         "n64" => {
-            let rom = n64::Cartridge::new(data.into());
+            let rom = n64::Cartridge::new(RawRomBe::mmap_file(&args.rom)?);
             let entry_pc = rom.base;
             analyze_and_dump(&args, Mips32::new, rom, iter::once(entry_pc));
         }
         _ => panic!("unsupported platform `{}`", platform),
     }
+    Ok(())
 }

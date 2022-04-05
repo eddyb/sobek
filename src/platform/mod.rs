@@ -14,7 +14,7 @@ pub trait Rom {
 pub struct RawRom<
     // FIXME(eddyb) use an `enum` when they're allowed in const generics on stable.
     const BIG_ENDIAN: bool,
-    T,
+    T = memmap2::Mmap,
 > {
     pub data: T,
 }
@@ -25,8 +25,17 @@ impl<const BIG_ENDIAN: bool, T> From<T> for RawRom<BIG_ENDIAN, T> {
     }
 }
 
-pub type RawRomLe<T> = RawRom<false, T>;
-pub type RawRomBe<T> = RawRom<true, T>;
+pub type RawRomLe<T = memmap2::Mmap> = RawRom<false, T>;
+pub type RawRomBe<T = memmap2::Mmap> = RawRom<true, T>;
+
+impl<const BIG_ENDIAN: bool> RawRom<BIG_ENDIAN> {
+    pub fn mmap_file(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        // FIXME(eddyb) is this safe? ideally "read-only CoW" would enforce that.
+        let data = unsafe { memmap2::MmapOptions::new().map_copy_read_only(&file)? };
+        Ok(Self { data })
+    }
+}
 
 impl<const BIG_ENDIAN: bool, T: Deref<Target = [u8]>> Rom for RawRom<BIG_ENDIAN, T> {
     fn load(&self, addr: Const, size: MemSize) -> Result<Const, UnsupportedAddress> {

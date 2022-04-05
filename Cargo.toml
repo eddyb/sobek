@@ -15,6 +15,7 @@ itertools = "0.8.2"
 term = "0.6.1"
 paw = "1.0.0"
 structopt = { version = "0.3.7", features = [ "paw" ] }
+memmap2 = "0.5.3"
 
 [lib]
 doctest = false

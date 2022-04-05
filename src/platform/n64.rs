@@ -4,12 +4,12 @@ use crate::platform::{RawRomBe, Rom, SimplePlatform, UnsupportedAddress};
 
 pub struct Cartridge {
     // FIXME(eddyb) should this support little-endian `N64` ROMs as well?
-    pub raw: RawRomBe<Vec<u8>>,
+    pub raw: RawRomBe,
     pub base: Const,
 }
 
 impl Cartridge {
-    pub fn new(raw: RawRomBe<Vec<u8>>) -> Self {
+    pub fn new(raw: RawRomBe) -> Self {
         let base = raw.load(Const::new(BitSize::B32, 8), MemSize::M32).unwrap();
         Cartridge { raw, base }
     }
