@@ -316,9 +316,16 @@ impl IntOp {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MemType {
+    pub addr_size: BitSize,
+    // FIXME(eddyb) should this be an `enum`?
+    pub big_endian: bool,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Type {
     Bits(BitSize),
-    Mem { addr_size: BitSize },
+    Mem(MemType),
 }
 
 impl Type {
@@ -329,9 +336,9 @@ impl Type {
         }
     }
 
-    pub fn mem_addr_size(self) -> Result<BitSize, Type> {
+    pub fn mem(self) -> Result<MemType, Type> {
         match self {
-            Type::Mem { addr_size } => Ok(addr_size),
+            Type::Mem(mem_type) => Ok(mem_type),
             _ => Err(self),
         }
     }
@@ -382,12 +389,15 @@ impl MemSize {
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct MemRef {
     pub mem: INode,
+    // HACK(eddyb) cached for e.g. `Node::ty`.
+    pub mem_type: MemType,
     pub addr: INode,
     pub size: MemSize,
 }
 
 impl fmt::Debug for MemRef {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // FIXME(eddyb) should this mention endianness in any way?
         write!(
             f,
             "{:?}[{:?}]{}",
@@ -402,6 +412,7 @@ impl MemRef {
     pub fn subst(self, cx: &Cx, base: &State) -> Self {
         MemRef {
             mem: self.mem.subst(cx, base),
+            mem_type: self.mem_type,
             addr: self.addr.subst(cx, base),
             size: self.size,
         }
@@ -563,8 +574,8 @@ impl Node {
     }
 
     pub fn ty(&self, cx: &Cx) -> Type {
-        match self {
-            Node::GlobalIn(g) => cx[*g].ty,
+        match *self {
+            Node::GlobalIn(g) => cx[g].ty,
 
             Node::Const(c) => Type::Bits(c.size),
 
@@ -575,13 +586,11 @@ impl Node {
             Node::Int(_, size, _, _)
             | Node::Trunc(size, _)
             | Node::Sext(size, _)
-            | Node::Zext(size, _) => Type::Bits(*size),
+            | Node::Zext(size, _) => Type::Bits(size),
 
             Node::Load(r) => Type::Bits(r.size.into()),
 
-            Node::Store(r, _) => Type::Mem {
-                addr_size: cx[r.addr].ty(cx).bit_size().unwrap(),
-            },
+            Node::Store(r, _) => Type::Mem(r.mem_type),
         }
     }
 
@@ -826,21 +835,13 @@ impl Node {
         }
 
         if let Node::Load(r) = self {
-            assert_eq!(
-                cx[r.mem].ty(cx),
-                Type::Mem {
-                    addr_size: cx[r.addr].ty(cx).bit_size().unwrap()
-                }
-            );
+            assert_eq!(cx[r.mem].ty(cx).mem().unwrap(), r.mem_type);
+            assert_eq!(r.mem_type.addr_size, cx[r.addr].ty(cx).bit_size().unwrap());
         }
 
         if let Node::Store(r, v) = self {
-            assert_eq!(
-                cx[r.mem].ty(cx),
-                Type::Mem {
-                    addr_size: cx[r.addr].ty(cx).bit_size().unwrap()
-                }
-            );
+            assert_eq!(cx[r.mem].ty(cx).mem().unwrap(), r.mem_type);
+            assert_eq!(r.mem_type.addr_size, cx[r.addr].ty(cx).bit_size().unwrap());
 
             let r_size: BitSize = r.size.into();
             assert_eq!(cx[v].ty(cx), Type::Bits(r_size));
@@ -1215,7 +1216,7 @@ impl Cx {
                     let prefix = match self.cx[node].ty(self.cx) {
                         // FIXME(eddyb) pre-intern.
                         Type::Bits(_) => self.cx.a("v"),
-                        Type::Mem { .. } => self.cx.a("m"),
+                        Type::Mem(_) => self.cx.a("m"),
                     };
                     let numbered_count = self.data.numbered_counts.entry(prefix).or_default();
                     let next = *numbered_count;

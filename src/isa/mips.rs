@@ -1,7 +1,7 @@
 use crate::ir::{
     BitSize::{self, *},
-    Const, Cx, Edge, Edges, Effect, Global, IGlobal, INode, IntOp, MemRef, MemSize, Node, State,
-    Type,
+    Const, Cx, Edge, Edges, Effect, Global, IGlobal, INode, IntOp, MemRef, MemSize, MemType, Node,
+    State, Type,
 };
 use crate::isa::Isa;
 use crate::platform::Rom;
@@ -9,17 +9,29 @@ use std::ops::Index;
 
 pub struct Mips32 {
     mem: IGlobal,
+    mem_type: MemType,
     regs32: Regs32,
     regs64_upper: Regs32,
 }
 
 impl Mips32 {
-    pub fn new(cx: &Cx) -> Self {
+    pub fn new_le(cx: &Cx) -> Self {
+        Self::new(cx, false)
+    }
+    pub fn new_be(cx: &Cx) -> Self {
+        Self::new(cx, true)
+    }
+    fn new(cx: &Cx, big_endian: bool) -> Self {
+        let mem_type = MemType {
+            addr_size: B32,
+            big_endian,
+        };
         Mips32 {
             mem: cx.a(Global {
-                ty: Type::Mem { addr_size: B32 },
+                ty: Type::Mem(mem_type),
                 name: cx.a("m"),
             }),
+            mem_type,
             regs32: Regs32::new(cx, None),
             regs64_upper: Regs32::new(cx, Some("upper")),
         }
@@ -197,7 +209,7 @@ impl Isa for Mips32 {
             }
         }
 
-        let instr = match rom.load(*pc, MemSize::M32) {
+        let instr = match rom.load(self.mem_type, *pc, MemSize::M32) {
             Ok(x) => x.as_u32(),
             Err(e) => error!("failed to read ROM: {:?}", e),
         };
@@ -513,6 +525,7 @@ impl Isa for Mips32 {
                 ($sz:ident) => {
                     MemRef {
                         mem: state.get(cx, self.mem),
+                        mem_type: self.mem_type,
                         addr: node!(Int(IntOp::Add, B32, rs, cx.a(imm))),
                         size: MemSize::$sz,
                     }

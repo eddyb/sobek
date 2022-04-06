@@ -183,9 +183,11 @@ impl INode {
                 }
 
                 if g == explorer.platform.isa().mem_containing_rom() {
+                    let mem_type = cx[g].ty.mem().unwrap();
+
                     // HACK(eddyb) assume it's from the ROM, if in range of it.
                     if let Some(addr) = cx[addr].as_const() {
-                        if let Ok(v) = explorer.platform.rom().load(addr, size) {
+                        if let Ok(v) = explorer.platform.rom().load(mem_type, addr, size) {
                             return cx.a(v).into();
                         }
                     }
@@ -202,6 +204,7 @@ impl INode {
                                             .platform
                                             .rom()
                                             .load(
+                                                mem_type,
                                                 Const::new(base_addr.size, base_addr.as_u64() + i),
                                                 size,
                                             )
@@ -225,7 +228,9 @@ impl INode {
                                 };
 
                                 if !index_may_be_pointer {
-                                    if let Ok(v) = explorer.platform.rom().load(base_addr, size) {
+                                    if let Ok(v) =
+                                        explorer.platform.rom().load(mem_type, base_addr, size)
+                                    {
                                         println!(
                                             "explore: possible array indexing with base {:?}, \
                                              assuming index ({}) is 0 and ignoring other values",
@@ -251,6 +256,7 @@ impl INode {
 
                 cx.a(Node::Load(MemRef {
                     mem: self,
+                    mem_type: cx[self].ty(cx).mem().unwrap(),
                     addr,
                     size,
                 }))
@@ -294,6 +300,7 @@ impl INode {
                         cx.a(Node::Store(
                             MemRef {
                                 mem,
+                                mem_type: r.mem_type,
                                 addr,
                                 size: r.size,
                             },
@@ -423,8 +430,9 @@ impl<'a> Explorer<'a> {
             let mut pc = Const::new(
                 self.cx[self.platform.isa().mem_containing_rom()]
                     .ty
-                    .mem_addr_size()
-                    .unwrap(),
+                    .mem()
+                    .unwrap()
+                    .addr_size,
                 bb.entry_pc,
             );
             let edges = loop {

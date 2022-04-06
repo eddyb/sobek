@@ -5,7 +5,7 @@ use sobek::isa::i8080::I8080;
 use sobek::isa::mips::Mips32;
 use sobek::isa::Isa;
 use sobek::platform::n64;
-use sobek::platform::{RawRomBe, RawRomLe, Rom, SimplePlatform};
+use sobek::platform::{RawRom, Rom, SimplePlatform};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -62,8 +62,9 @@ fn analyze_and_dump<I: Isa>(mut args: Args, mk_isa: impl FnOnce(&Cx) -> I, rom: 
 
     let rom_addr_size = cx[platform.isa.mem_containing_rom()]
         .ty
-        .mem_addr_size()
-        .unwrap();
+        .mem()
+        .unwrap()
+        .addr_size;
 
     let cancel_token = Arc::new(AtomicBool::new(false));
     let ctrcc_result = {
@@ -113,8 +114,9 @@ fn analyze_and_dump<I: Isa>(mut args: Args, mk_isa: impl FnOnce(&Cx) -> I, rom: 
 
 #[paw::main]
 fn main(mut args: Args) -> std::io::Result<()> {
-    // FIXME(eddyb) don't default to an endianness here.
-    let rom = RawRomLe::mmap_file(&args.rom)?;
+    let rom = RawRom::mmap_file(&args.rom)?;
+    let rom = RawRom(&rom.0[..]);
+
     let platform = match &args.platform {
         Some(p) => &p[..],
         None => panic!("unable auto-detect platform (NYI)"),
@@ -134,11 +136,12 @@ fn main(mut args: Args) -> std::io::Result<()> {
             analyze_and_dump(args, I8080::new_lr35902, rom);
         }
         "n64" => {
-            let rom = n64::Cartridge::new(RawRomBe { data: rom.data });
+            let rom = n64::Cartridge::new(rom);
             args.entry.push(rom.base.as_u64());
-            analyze_and_dump(args, Mips32::new, rom);
+            analyze_and_dump(args, Mips32::new_be, rom);
         }
         _ => panic!("unsupported platform `{}`", platform),
     }
+
     Ok(())
 }

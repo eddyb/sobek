@@ -1,6 +1,6 @@
 pub mod n64;
 
-use crate::ir::{Const, MemSize};
+use crate::ir::{Const, MemSize, MemType};
 use crate::isa::Isa;
 use std::ops::Deref;
 
@@ -8,42 +8,37 @@ use std::ops::Deref;
 pub struct UnsupportedAddress(pub Const);
 
 pub trait Rom {
-    fn load(&self, addr: Const, size: MemSize) -> Result<Const, UnsupportedAddress>;
+    fn load(
+        &self,
+        mem_type: MemType,
+        addr: Const,
+        size: MemSize,
+    ) -> Result<Const, UnsupportedAddress>;
 }
 
-pub struct RawRom<
-    // FIXME(eddyb) use an `enum` when they're allowed in const generics on stable.
-    const BIG_ENDIAN: bool,
-    T = memmap2::Mmap,
-> {
-    pub data: T,
-}
+pub struct RawRom<R: Deref<Target = [u8]>>(pub R);
 
-impl<const BIG_ENDIAN: bool, T> From<T> for RawRom<BIG_ENDIAN, T> {
-    fn from(data: T) -> Self {
-        Self { data }
-    }
-}
-
-pub type RawRomLe<T = memmap2::Mmap> = RawRom<false, T>;
-pub type RawRomBe<T = memmap2::Mmap> = RawRom<true, T>;
-
-impl<const BIG_ENDIAN: bool> RawRom<BIG_ENDIAN> {
+impl RawRom<memmap2::Mmap> {
     pub fn mmap_file(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
         let file = std::fs::File::open(path)?;
         // FIXME(eddyb) is this safe? ideally "read-only CoW" would enforce that.
         let data = unsafe { memmap2::MmapOptions::new().map_copy_read_only(&file)? };
-        Ok(Self { data })
+        Ok(Self(data))
     }
 }
 
-impl<const BIG_ENDIAN: bool, T: Deref<Target = [u8]>> Rom for RawRom<BIG_ENDIAN, T> {
-    fn load(&self, addr: Const, size: MemSize) -> Result<Const, UnsupportedAddress> {
+impl<R: Deref<Target = [u8]>> Rom for RawRom<R> {
+    fn load(
+        &self,
+        mem_type: MemType,
+        addr: Const,
+        size: MemSize,
+    ) -> Result<Const, UnsupportedAddress> {
         let err = UnsupportedAddress(addr);
         let addr = addr.as_u64();
         let bytes = usize::try_from(addr)
             .ok()
-            .and_then(|addr| self.data.get(addr..)?.get(..usize::from(size.bytes())))
+            .and_then(|addr| self.0.get(addr..)?.get(..usize::from(size.bytes())))
             .ok_or(err)?;
 
         macro_rules! from_bytes {
@@ -52,7 +47,7 @@ impl<const BIG_ENDIAN: bool, T: Deref<Target = [u8]>> Rom for RawRom<BIG_ENDIAN,
 
                 let &bytes = bytes.try_into().unwrap();
 
-                (if BIG_ENDIAN {
+                (if mem_type.big_endian {
                     <$uint>::from_be_bytes(bytes)
                 } else {
                     <$uint>::from_le_bytes(bytes)

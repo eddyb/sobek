@@ -1,20 +1,34 @@
-use crate::ir::{BitSize, Const, MemSize};
+use crate::ir::{BitSize, Const, MemSize, MemType};
 use crate::isa::mips::{AddrSpace, Mips32};
-use crate::platform::{RawRomBe, Rom, SimplePlatform, UnsupportedAddress};
+use crate::platform::{RawRom, Rom, SimplePlatform, UnsupportedAddress};
+use std::ops::Deref;
 
-pub struct Cartridge {
-    // FIXME(eddyb) should this support little-endian `N64` ROMs as well?
-    pub raw: RawRomBe,
+pub struct Cartridge<R: Deref<Target = [u8]>> {
+    pub raw: RawRom<R>,
     pub base: Const,
 }
 
-impl Cartridge {
-    pub fn new(raw: RawRomBe) -> Self {
-        let base = raw.load(Const::new(BitSize::B32, 8), MemSize::M32).unwrap();
+impl<R: Deref<Target = [u8]>> Cartridge<R> {
+    pub fn new(raw: RawRom<R>) -> Self {
+        let base = raw
+            .load(
+                MemType {
+                    addr_size: BitSize::B32,
+                    big_endian: true,
+                },
+                Const::new(BitSize::B32, 8),
+                MemSize::M32,
+            )
+            .unwrap();
         Cartridge { raw, base }
     }
 
-    fn load_physical(&self, addr: Const, size: MemSize) -> Result<Const, UnsupportedAddress> {
+    fn load_physical(
+        &self,
+        mem_type: MemType,
+        addr: Const,
+        size: MemSize,
+    ) -> Result<Const, UnsupportedAddress> {
         // FIXME(eddyb) do this only once.
         let (base_addr_space, base) = Mips32::decode_addr(self.base.as_u32());
         assert_eq!(base_addr_space, AddrSpace::Direct { cached: true });
@@ -22,6 +36,7 @@ impl Cartridge {
         match addr.as_u32() {
             // TODO(eddyb) make sure this is actually correct now.
             addr @ 0..=0x003f_ffff if addr >= base => self.raw.load(
+                mem_type,
                 Const::new(BitSize::B32, (0x1000 + (addr - base)) as u64),
                 size,
             ),
@@ -30,17 +45,22 @@ impl Cartridge {
     }
 }
 
-impl Rom for Cartridge {
-    fn load(&self, addr: Const, size: MemSize) -> Result<Const, UnsupportedAddress> {
+impl<R: Deref<Target = [u8]>> Rom for Cartridge<R> {
+    fn load(
+        &self,
+        mem_type: MemType,
+        addr: Const,
+        size: MemSize,
+    ) -> Result<Const, UnsupportedAddress> {
         let err = UnsupportedAddress(addr);
         let (addr_space, addr) = Mips32::decode_addr(addr.as_u32());
         match addr_space {
             AddrSpace::Direct { .. } => self
-                .load_physical(Const::new(BitSize::B32, addr as u64), size)
+                .load_physical(mem_type, Const::new(BitSize::B32, addr as u64), size)
                 .map_err(|_| err),
             AddrSpace::Mapped(_) => Err(err),
         }
     }
 }
 
-pub type N64 = SimplePlatform<Mips32, Cartridge>;
+pub type N64<R> = SimplePlatform<Mips32, Cartridge<R>>;

@@ -1,6 +1,6 @@
 use crate::ir::{
     BitSize::*, Const, Cx, Edge, Edges, Effect, Global, IGlobal, INode, IntOp, MemRef, MemSize,
-    Node, State, Type,
+    MemType, Node, State, Type,
 };
 use crate::isa::Isa;
 use crate::platform::Rom;
@@ -14,18 +14,29 @@ pub struct I8051 {
 }
 
 impl I8051 {
+    const ROM_MEM_TYPE: MemType = MemType {
+        addr_size: B16,
+        big_endian: false,
+    };
+
     pub fn new(cx: &Cx) -> Self {
         I8051 {
             mem: cx.a(Global {
-                ty: Type::Mem { addr_size: B8 },
+                ty: Type::Mem(MemType {
+                    addr_size: B8,
+                    big_endian: false,
+                }),
                 name: cx.a("m"),
             }),
             rom: cx.a(Global {
-                ty: Type::Mem { addr_size: B16 },
+                ty: Type::Mem(Self::ROM_MEM_TYPE),
                 name: cx.a("rom"),
             }),
             ext: cx.a(Global {
-                ty: Type::Mem { addr_size: B16 },
+                ty: Type::Mem(MemType {
+                    addr_size: B16,
+                    big_endian: false,
+                }),
                 name: cx.a("ext"),
             }),
             regs: Regs::new(cx),
@@ -118,7 +129,7 @@ impl Isa for I8051 {
 
         macro_rules! imm {
             (8) => {{
-                let v = match rom.load(*pc, MemSize::M8) {
+                let v = match rom.load(Self::ROM_MEM_TYPE, *pc, MemSize::M8) {
                     Ok(v) => v,
                     Err(e) => error!("failed to read ROM: {:?}", e),
                 };
@@ -141,6 +152,7 @@ impl Isa for I8051 {
             ($addr:expr, $sz:ident) => {
                 MemRef {
                     mem: state.get(cx, self.mem),
+                    mem_type: cx[self.mem].ty.mem().unwrap(),
                     addr: $addr,
                     size: MemSize::$sz,
                 }
@@ -285,6 +297,7 @@ impl Isa for I8051 {
                     }
                     Operand::Mem(mem, addr) => node!(Load(MemRef {
                         mem: state.get(cx, mem),
+                        mem_type: cx[mem].ty.mem().unwrap(),
                         addr,
                         size: MemSize::M8,
                     })),
@@ -310,6 +323,7 @@ impl Isa for I8051 {
                         node!(Store(
                             MemRef {
                                 mem: state.get(cx, mem),
+                                mem_type: cx[mem].ty.mem().unwrap(),
                                 addr,
                                 size: MemSize::M8,
                             },

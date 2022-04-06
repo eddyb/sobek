@@ -1,6 +1,6 @@
 use crate::ir::{
-    BitSize::*, Const, Cx, Edge, Edges, Effect, Global, IGlobal, IntOp, MemRef, MemSize, Node,
-    State, Type,
+    BitSize::*, Const, Cx, Edge, Edges, Effect, Global, IGlobal, IntOp, MemRef, MemSize, MemType,
+    Node, State, Type,
 };
 use crate::isa::Isa;
 use crate::platform::Rom;
@@ -19,11 +19,16 @@ pub struct I8080 {
 }
 
 impl I8080 {
+    const MEM_TYPE: MemType = MemType {
+        addr_size: B16,
+        big_endian: false,
+    };
+
     pub fn new(cx: &Cx) -> Self {
         I8080 {
             flavor: Flavor::Intel,
             mem: cx.a(Global {
-                ty: Type::Mem { addr_size: B16 },
+                ty: Type::Mem(Self::MEM_TYPE),
                 name: cx.a("m"),
             }),
             regs: Regs::new(cx),
@@ -34,7 +39,7 @@ impl I8080 {
         I8080 {
             flavor: Flavor::LR35902,
             mem: cx.a(Global {
-                ty: Type::Mem { addr_size: B16 },
+                ty: Type::Mem(Self::MEM_TYPE),
                 name: cx.a("m"),
             }),
             regs: Regs::new(cx),
@@ -173,7 +178,7 @@ impl Isa for I8080 {
 
         macro_rules! imm {
             (8) => {{
-                let v = match rom.load(*pc, MemSize::M8) {
+                let v = match rom.load(Self::MEM_TYPE, *pc, MemSize::M8) {
                     Ok(v) => v,
                     Err(e) => error!("failed to read ROM: {:?}", e),
                 };
@@ -196,6 +201,7 @@ impl Isa for I8080 {
             ($addr:expr, $sz:ident) => {
                 MemRef {
                     mem: state.get(cx, self.mem),
+                    mem_type: Self::MEM_TYPE,
                     addr: $addr,
                     size: MemSize::$sz,
                 }
