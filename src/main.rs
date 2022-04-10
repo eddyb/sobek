@@ -4,7 +4,7 @@ use sobek::isa::i8051::I8051;
 use sobek::isa::i8080::I8080;
 use sobek::isa::mips::Mips32;
 use sobek::isa::Isa;
-use sobek::platform::n64;
+use sobek::platform::{n64, unix};
 use sobek::platform::{RawRom, Rom, SimplePlatform};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -139,6 +139,13 @@ fn main(mut args: Args) -> std::io::Result<()> {
             let rom = n64::Cartridge::new(rom);
             args.entry.push(rom.base.as_u64());
             analyze_and_dump(args, Mips32::new_be, rom);
+        }
+        "mipsel-linux" => {
+            // FIXME(eddyb) symbolic load addresses would be ideal here,
+            // arbitrarily recognizable constant used instead for now.
+            let exe = unix::Executable::load_at_virtual_addr(rom, 0x7000_0000);
+            args.entry.push(exe.virtual_entry);
+            analyze_and_dump(args, Mips32::new_le, exe);
         }
         _ => panic!("unsupported platform `{}`", platform),
     }

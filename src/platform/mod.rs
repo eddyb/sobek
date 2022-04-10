@@ -1,4 +1,5 @@
 pub mod n64;
+pub mod unix;
 
 use crate::ir::{Const, MemSize, MemType};
 use crate::isa::Isa;
@@ -43,21 +44,20 @@ impl<R: Deref<Target = [u8]>> Rom for RawRom<R> {
 
         macro_rules! from_bytes {
             ($uint:ty) => {{
-                assert_eq!(addr & (size.bytes() - 1) as u64, 0);
-
                 let &bytes = bytes.try_into().unwrap();
 
-                (if mem_type.big_endian {
+                if mem_type.big_endian {
                     <$uint>::from_be_bytes(bytes)
                 } else {
                     <$uint>::from_le_bytes(bytes)
-                } as u64)
+                }
+                .into()
             }};
         }
         Ok(Const::new(
             size.into(),
             match size {
-                MemSize::M8 => bytes[0] as u64,
+                MemSize::M8 => bytes[0].into(),
                 MemSize::M16 => from_bytes!(u16),
                 MemSize::M32 => from_bytes!(u32),
                 MemSize::M64 => from_bytes!(u64),
