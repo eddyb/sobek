@@ -455,13 +455,26 @@ impl Isa for Mips32 {
             set_reg_maybe64!(rd, v);
         } else if op == 1 {
             // REGIMM (I format w/o rt).
+            let rs_was_zero = rs == 0;
             let rs = state.mips32_get(self, cx, rs, B32);
             match rt {
-                0 => {
-                    return branch!(node!(Int(IntOp::LtS, B32, rs, cx.a(Const::new(B32, 0)))) => true)
+                0 | 16 => {
+                    if (rt & 16) != 0 {
+                        link!();
+                    }
+                    return branch!(node!(Int(IntOp::LtS, B32, rs, cx.a(Const::new(B32, 0)))) => true);
                 }
-                1 => {
-                    return branch!(node!(Int(IntOp::LtS, B32, rs, cx.a(Const::new(B32, 0)))) => false)
+                1 | 17 => {
+                    if (rt & 16) != 0 {
+                        link!();
+                    }
+                    if rs_was_zero {
+                        // Special-case `zero == zero` branches to jumps.
+                        // HACK(eddyb) this is done here to avoid const-folding
+                        // away control-flow in the general case.
+                        return jump!(branch_target!());
+                    }
+                    return branch!(node!(Int(IntOp::LtS, B32, rs, cx.a(Const::new(B32, 0)))) => false);
                 }
                 _ => error!("unknown REGIMM rt={}", rt),
             }
