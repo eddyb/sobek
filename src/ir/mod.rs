@@ -770,6 +770,63 @@ impl Node {
                 }
                 _ => {}
             }
+
+            // HACK(eddyb) replace a pair of zero-extending loads of the form:
+            // * first:  `zext_{2N}(m[x]_N)`
+            // * second: `zext_{2N}(m[x + {N / 8}]_N)`
+            // followed by `lo | (hi << N)`, with `m[x]_{2N}`,
+            // where `(first, second)` map to:
+            // * `(lo, hi)` if `m` is little-endian
+            // * `(hi, lo)` if `m` is big-endian
+            // That is, fuse two N-bit loads into a single 2N-bit load.
+            // FIXME(eddyb) this uses `if let` instead of `match`, change the rest too?
+            if let (
+                IntOp::Or,
+                Node::Zext(lo_zext_size, lo),
+                Node::Int(IntOp::Shl, _, hi, hi_shift),
+            ) = (op, cx[a], cx[b])
+            {
+                if let (Node::Zext(hi_zext_size, hi), Node::Const(hi_shift)) =
+                    (cx[hi], cx[hi_shift])
+                {
+                    if lo_zext_size == hi_zext_size && hi_shift.as_u8() * 2 == lo_zext_size.bits() {
+                        if let (Node::Load(lo), Node::Load(hi)) = (cx[lo], cx[hi]) {
+                            if lo.mem == hi.mem
+                                && lo.mem_type == hi.mem_type
+                                && lo.size == hi.size
+                                && lo.size.bytes() * 8 * 2 == lo_zext_size.bits()
+                            {
+                                let (first, second) = if lo.mem_type.big_endian {
+                                    (hi, lo)
+                                } else {
+                                    (lo, hi)
+                                };
+                                if let Node::Int(
+                                    IntOp::Add,
+                                    addr_size,
+                                    second_addr_base,
+                                    second_addr_offset,
+                                ) = cx[second.addr]
+                                {
+                                    if second_addr_base == first.addr
+                                        && cx[second_addr_offset]
+                                            == Node::Const(Const::new(
+                                                addr_size,
+                                                first.size.bytes().into(),
+                                            ))
+                                    {
+                                        return Node::Load(MemRef {
+                                            size: MemSize::M16,
+                                            ..first
+                                        })
+                                        .normalize(cx);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // FIXME(eddyb) deduplicate these
