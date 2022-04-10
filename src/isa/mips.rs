@@ -5,13 +5,13 @@ use crate::ir::{
 };
 use crate::isa::Isa;
 use crate::platform::Rom;
-use std::ops::Index;
+use std::{convert::Infallible, num::NonZeroU8, ops::Index};
 
 pub struct Mips32 {
     mem: IGlobal,
     mem_type: MemType,
-    regs32: Regs32,
-    regs64_upper: Regs32,
+    regs32: Regs,
+    regs64_upper: Regs,
 }
 
 impl Mips32 {
@@ -22,8 +22,9 @@ impl Mips32 {
         Self::new(cx, true)
     }
     fn new(cx: &Cx, big_endian: bool) -> Self {
+        let reg_size = B32;
         let mem_type = MemType {
-            addr_size: B32,
+            addr_size: reg_size,
             big_endian,
         };
         Mips32 {
@@ -32,8 +33,8 @@ impl Mips32 {
                 name: cx.a("m"),
             }),
             mem_type,
-            regs32: Regs32::new(cx, None),
-            regs64_upper: Regs32::new(cx, Some("upper")),
+            regs32: Regs::new(cx, reg_size, None),
+            regs64_upper: Regs::new(cx, reg_size, Some("upper")),
         }
     }
 }
@@ -65,17 +66,17 @@ impl Mips32 {
     }
 }
 
-struct Regs32 {
-    gpr: [IGlobal; 32],
+struct Regs {
+    gpr_without_zero: [IGlobal; 31],
     lo: IGlobal,
     hi: IGlobal,
 }
 
-impl Regs32 {
-    fn new(cx: &Cx, suffix: Option<&str>) -> Self {
+impl Regs {
+    fn new(cx: &Cx, size: BitSize, suffix: Option<&str>) -> Self {
         let reg = |name| {
             cx.a(Global {
-                ty: Type::Bits(B32),
+                ty: Type::Bits(size),
                 name: match suffix {
                     None => cx.a(name),
                     Some(suffix) => cx.a(&format!("{}.{}", name, suffix)[..]),
@@ -89,9 +90,9 @@ impl Regs32 {
             }
         }
 
-        Regs32 {
-            gpr: reg_array![
-                zero__THIS_SHOULD_NEVER_BE_USED
+        Regs {
+            gpr_without_zero: reg_array![
+                // `zero` register omitted.
                 at
                 rv0 rv1
                 a0 a1 a2 a3
@@ -112,24 +113,34 @@ impl Regs32 {
 
 #[derive(Copy, Clone)]
 enum Reg {
-    Gpr(u8),
+    Gpr(NonZeroU8),
     Lo,
     Hi,
 }
 
-impl From<u32> for Reg {
-    fn from(i: u32) -> Self {
-        assert!(i < 32);
-        Reg::Gpr(i as u8)
+/// Error type for attempting to refer to the `zero` register through `Reg`.
+struct ZeroReg;
+
+impl From<Infallible> for ZeroReg {
+    fn from(never: Infallible) -> Self {
+        match never {}
     }
 }
 
-impl Index<Reg> for Regs32 {
+impl TryFrom<u32> for Reg {
+    type Error = ZeroReg;
+    fn try_from(i: u32) -> Result<Self, ZeroReg> {
+        assert!(matches!(i, 0..=31));
+        Ok(Reg::Gpr(NonZeroU8::new(i as u8).ok_or(ZeroReg)?))
+    }
+}
+
+impl Index<Reg> for Regs {
     type Output = IGlobal;
 
     fn index(&self, r: Reg) -> &IGlobal {
         match r {
-            Reg::Gpr(i) => &self.gpr[i as usize],
+            Reg::Gpr(i) => &self.gpr_without_zero[i.get() as usize - 1],
             Reg::Lo => &self.lo,
             Reg::Hi => &self.hi,
         }
@@ -138,51 +149,65 @@ impl Index<Reg> for Regs32 {
 
 // FIXME(eddyb) make a `State` wrapper to contain these helpers.
 impl State {
-    fn mips32_get(&self, isa: &Mips32, cx: &Cx, r: impl Into<Reg>, size: BitSize) -> INode {
-        let r = r.into();
-        if let Reg::Gpr(0) = r {
-            cx.a(Const::new(size, 0))
-        } else {
-            let v32 = self.get(cx, isa.regs32[r]);
-            match size {
-                B32 => v32,
-                B64 => cx.a(Node::Int(
-                    IntOp::Or,
-                    B64,
-                    cx.a(Node::Int(
-                        IntOp::Shl,
+    fn mips32_get(
+        &self,
+        isa: &Mips32,
+        cx: &Cx,
+        r: impl TryInto<Reg, Error = impl Into<ZeroReg>>,
+        size: BitSize,
+    ) -> INode {
+        match r.try_into().map_err(|e| e.into()) {
+            Err(ZeroReg) => cx.a(Const::new(size, 0)),
+            Ok(r) => {
+                let v32 = self.get(cx, isa.regs32[r]);
+                match size {
+                    B32 => v32,
+                    B64 => cx.a(Node::Int(
+                        IntOp::Or,
                         B64,
-                        cx.a(Node::Zext(B64, self.get(cx, isa.regs64_upper[r]))),
-                        cx.a(Const::new(B8, 32)),
+                        cx.a(Node::Int(
+                            IntOp::Shl,
+                            B64,
+                            cx.a(Node::Zext(B64, self.get(cx, isa.regs64_upper[r]))),
+                            cx.a(Const::new(B8, 32)),
+                        )),
+                        cx.a(Node::Zext(B64, v32)),
                     )),
-                    cx.a(Node::Zext(B64, v32)),
-                )),
-                _ => unreachable!(),
+                    _ => unreachable!(),
+                }
             }
         }
     }
 
-    fn mips32_set(&mut self, isa: &Mips32, cx: &Cx, r: impl Into<Reg>, v: INode) {
-        let r = r.into();
-        if let Reg::Gpr(0) = r {
-            // Writes to the zero register are noops.
-        } else {
-            let size = cx[v].ty(cx).bit_size().unwrap();
-            let v32 = match size {
-                B32 => v,
-                B64 => cx.a(Node::Trunc(B32, v)),
-                _ => unreachable!(),
-            };
-            self.set(cx, isa.regs32[r], v32);
-            if size == B64 {
-                self.set(
-                    cx,
-                    isa.regs64_upper[r],
-                    cx.a(Node::Trunc(
-                        B32,
-                        cx.a(Node::Int(IntOp::ShrU, B64, v, cx.a(Const::new(B8, 32)))),
-                    )),
-                );
+    fn mips32_set(
+        &mut self,
+        isa: &Mips32,
+        cx: &Cx,
+        r: impl TryInto<Reg, Error = impl Into<ZeroReg>>,
+        v: INode,
+    ) {
+        match r.try_into().map_err(|e| e.into()) {
+            Err(ZeroReg) => {
+                // Writes to the zero register are noops.
+            }
+            Ok(r) => {
+                let size = cx[v].ty(cx).bit_size().unwrap();
+                let v32 = match size {
+                    B32 => v,
+                    B64 => cx.a(Node::Trunc(B32, v)),
+                    _ => unreachable!(),
+                };
+                self.set(cx, isa.regs32[r], v32);
+                if size == B64 {
+                    self.set(
+                        cx,
+                        isa.regs64_upper[r],
+                        cx.a(Node::Trunc(
+                            B32,
+                            cx.a(Node::Int(IntOp::ShrU, B64, v, cx.a(Const::new(B8, 32)))),
+                        )),
+                    );
+                }
             }
         }
     }
@@ -613,7 +638,9 @@ impl Isa for Mips32 {
                             call: format!(
                                 "CACHE(op={}, base={}, imm={:?})",
                                 field(16, 5),
-                                &cx[cx[self.regs32[Reg::from(field(21, 5))]].name],
+                                Reg::try_from(field(21, 5))
+                                    .map(|r| &cx[cx[self.regs32[r]].name])
+                                    .unwrap_or_else(|ZeroReg| "zero"),
                                 imm,
                             ),
                             next_pc: cx.a(*pc),
@@ -632,7 +659,9 @@ impl Isa for Mips32 {
                                 if (op & 8) == 0 { 'L' } else { 'S' },
                                 if (op & 4) == 0 { 'W' } else { 'D' },
                                 rd,
-                                &cx[cx[self.regs32[Reg::from(field(21, 5))]].name],
+                                Reg::try_from(field(21, 5))
+                                    .map(|r| &cx[cx[self.regs32[r]].name])
+                                    .unwrap_or_else(|ZeroReg| "zero"),
                                 imm
                             ),
                             next_pc: cx.a(*pc),
