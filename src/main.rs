@@ -3,9 +3,8 @@ use sobek::ir::{Const, Cx};
 use sobek::isa::i8051::I8051;
 use sobek::isa::i8080::I8080;
 use sobek::isa::mips::Mips32;
-use sobek::isa::Isa;
-use sobek::platform::{n64, unix};
-use sobek::platform::{RawRom, Rom, SimplePlatform};
+use sobek::platform::{n64, unix, Platform};
+use sobek::platform::{RawRom, SimplePlatform};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,14 +52,11 @@ struct Args {
     rom: PathBuf,
 }
 
-fn analyze_and_dump<I: Isa>(mut args: Args, mk_isa: impl FnOnce(&Cx) -> I, rom: impl Rom) {
+fn analyze_and_dump<P: Platform>(mut args: Args, mk_platform: impl FnOnce(&Cx) -> P) {
     let cx = Cx::new();
-    let platform = SimplePlatform {
-        isa: mk_isa(&cx),
-        rom,
-    };
+    let platform = mk_platform(&cx);
 
-    let rom_addr_size = cx[platform.isa.mem_containing_rom()]
+    let rom_addr_size = cx[platform.isa().mem_containing_rom()]
         .ty
         .mem()
         .unwrap()
@@ -124,28 +120,40 @@ fn main(mut args: Args) -> std::io::Result<()> {
     match platform {
         "8051" => {
             args.entry.push(0);
-            analyze_and_dump(args, I8051::new, rom);
+            analyze_and_dump(args, |cx| SimplePlatform {
+                isa: I8051::new(cx),
+                rom,
+            });
         }
         "8080" => {
             args.entry.push(0);
-            analyze_and_dump(args, I8080::new, rom);
+            analyze_and_dump(args, |cx| SimplePlatform {
+                isa: I8080::new(cx),
+                rom,
+            });
         }
         "gb" => {
             args.entry.push(0x100);
             args.entry.extend((0..5).map(|i| 0x40 + i * 8));
-            analyze_and_dump(args, I8080::new_lr35902, rom);
+            analyze_and_dump(args, |cx| SimplePlatform {
+                isa: I8080::new_lr35902(cx),
+                rom,
+            });
         }
         "n64" => {
             let rom = n64::Cartridge::new(rom);
             args.entry.push(rom.base.as_u64());
-            analyze_and_dump(args, Mips32::new_be, rom);
+            analyze_and_dump(args, |cx| n64::N64::new(cx, rom));
         }
         "mipsel-linux" => {
             // FIXME(eddyb) symbolic load addresses would be ideal here,
             // arbitrarily recognizable constant used instead for now.
             let exe = unix::Executable::load_at_virtual_addr(rom, 0x7000_0000);
             args.entry.push(exe.virtual_entry);
-            analyze_and_dump(args, Mips32::new_le, exe);
+            analyze_and_dump(args, |cx| SimplePlatform {
+                isa: Mips32::new_le(cx),
+                rom: exe,
+            });
         }
         _ => panic!("unsupported platform `{}`", platform),
     }

@@ -1,6 +1,7 @@
-use crate::ir::{BitSize, Const, MemSize, MemType};
+use crate::ir::{BitSize, Const, Cx, MemSize, MemType};
 use crate::isa::mips::{AddrSpace, Mips32};
-use crate::platform::{RawRom, Rom, SimplePlatform, UnsupportedAddress};
+use crate::isa::Isa;
+use crate::platform::{Platform, RawRom, Rom, UnsupportedAddress};
 use std::ops::Deref;
 
 pub struct Cartridge<R: Deref<Target = [u8]>> {
@@ -63,4 +64,27 @@ impl<R: Deref<Target = [u8]>> Rom for Cartridge<R> {
     }
 }
 
-pub type N64<R> = SimplePlatform<Mips32, Cartridge<R>>;
+// FIXME(eddyb) this is only different from `SimplePlatform` in providing
+// a custom constructor.
+pub struct N64<R: Deref<Target = [u8]>> {
+    pub isa: Mips32,
+    pub rom: Cartridge<R>,
+}
+
+impl<R: Deref<Target = [u8]>> Platform for N64<R> {
+    fn isa(&self) -> &dyn Isa {
+        &self.isa
+    }
+    fn rom(&self) -> &dyn Rom {
+        &self.rom
+    }
+}
+
+impl<R: Deref<Target = [u8]>> N64<R> {
+    pub fn new(cx: &Cx, rom: Cartridge<R>) -> Self {
+        N64 {
+            isa: Mips32::new_be(cx),
+            rom,
+        }
+    }
+}
