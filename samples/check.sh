@@ -57,7 +57,8 @@ sample() {
     if [ "$log" -nt "$sobek" ] && [ "$log" -nt samples/samples.sh ] && [ "$log" -nt "$rom" ]; then
         echo "    Skipping ($log is fresh according to mtime)..."
     else
-        "$sobek" -p "$platform" "$rom" "${flags[@]}" > "$log".new
+        command time -f "    Completed in %E (%Us user / %MkiB max RSS)" \
+            "$sobek" -p "$platform" "$rom" "${flags[@]}" > "$log".new
         check_log
     fi
 }
