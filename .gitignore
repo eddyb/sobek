@@ -1,15 +1,8 @@
+# Cargo artifacts.
 target/
-**/*.rs.bk
-Cargo.lock
 
-# ROMs.
-*.bin*
-*.rom*
-*.gb*
-*.n64*
-*.v64*
-*.z64*
+# IDE local settings.
+.vscode/
 
-# Output files.
-# FIXME(eddyb) find a better format and/or get rid of this.
-*.log*.rs
+# Misc local dirs.
+\#*
