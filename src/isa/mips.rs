@@ -5,13 +5,13 @@ use crate::ir::{
 };
 use crate::isa::Isa;
 use crate::platform::Rom;
+use core::fmt;
 use std::{convert::Infallible, num::NonZeroU8, ops::Index};
 
 pub struct Mips32 {
     mem: IGlobal,
     mem_type: MemType,
-    regs32: Regs,
-    regs64_upper: Regs,
+    regs: Regs,
 }
 
 impl Mips32 {
@@ -33,8 +33,7 @@ impl Mips32 {
                 name: cx.a("m"),
             }),
             mem_type,
-            regs32: Regs::new(cx, reg_size, None),
-            regs64_upper: Regs::new(cx, reg_size, Some("upper")),
+            regs: Regs::new(cx, reg_size),
         }
     }
 }
@@ -73,14 +72,11 @@ struct Regs {
 }
 
 impl Regs {
-    fn new(cx: &Cx, size: BitSize, suffix: Option<&str>) -> Self {
+    fn new(cx: &Cx, size: BitSize) -> Self {
         let reg = |name| {
             cx.a(Global {
                 ty: Type::Bits(size),
-                name: match suffix {
-                    None => cx.a(name),
-                    Some(suffix) => cx.a(&format!("{}.{}", name, suffix)[..]),
-                },
+                name: cx.a(name),
             })
         };
 
@@ -147,69 +143,79 @@ impl Index<Reg> for Regs {
     }
 }
 
+/// Error type for attempting to use a 64-bit operation (presumably from MIPS64)
+/// on MIPS32.
+// FIXME(eddyb) actually check opcodes instead of just reacting to `B64` values.
+#[derive(Debug)]
+enum Mips64OpNotSupportedOnMips32<'a> {
+    RegRead { name: &'a str },
+    RegWrite { name: &'a str },
+}
+
+impl fmt::Display for Mips64OpNotSupportedOnMips32<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RegRead { name } => write!(f, "64-bit read from `{}` on MIPS32", name),
+            Self::RegWrite { name } => write!(f, "64-bit write to `{}` on MIPS32", name),
+        }
+    }
+}
+
 // FIXME(eddyb) make a `State` wrapper to contain these helpers.
 impl State {
-    fn mips32_get(
+    fn mips32_get<'a>(
         &self,
         isa: &Mips32,
-        cx: &Cx,
+        cx: &'a Cx,
         r: impl TryInto<Reg, Error = impl Into<ZeroReg>>,
         size: BitSize,
-    ) -> INode {
+    ) -> Result<INode, Mips64OpNotSupportedOnMips32<'a>> {
         match r.try_into().map_err(|e| e.into()) {
-            Err(ZeroReg) => cx.a(Const::new(size, 0)),
+            Err(ZeroReg) => {
+                // FIXME(eddyb) check `size`.
+                Ok(cx.a(Const::new(size, 0)))
+            }
             Ok(r) => {
-                let v32 = self.get(cx, isa.regs32[r]);
+                let v32 = self.get(cx, isa.regs[r]);
+                assert_eq!(cx[v32].ty(cx), Type::Bits(B32));
                 match size {
-                    B32 => v32,
-                    B64 => cx.a(Node::Int(
-                        IntOp::Or,
-                        B64,
-                        cx.a(Node::Int(
-                            IntOp::Shl,
-                            B64,
-                            cx.a(Node::Zext(B64, self.get(cx, isa.regs64_upper[r]))),
-                            cx.a(Const::new(B8, 32)),
-                        )),
-                        cx.a(Node::Zext(B64, v32)),
-                    )),
+                    B32 => Ok(v32),
+                    B64 => Err(Mips64OpNotSupportedOnMips32::RegRead {
+                        name: &cx[cx[isa.regs[r]].name],
+                    }),
                     _ => unreachable!(),
                 }
             }
         }
     }
 
-    fn mips32_set(
+    fn mips32_set<'a>(
         &mut self,
         isa: &Mips32,
-        cx: &Cx,
+        cx: &'a Cx,
         r: impl TryInto<Reg, Error = impl Into<ZeroReg>>,
         v: INode,
-    ) {
+    ) -> Result<(), Mips64OpNotSupportedOnMips32<'a>> {
+        let size = cx[v].ty(cx).bit_size().unwrap();
         match r.try_into().map_err(|e| e.into()) {
             Err(ZeroReg) => {
                 // Writes to the zero register are noops.
+                // FIXME(eddyb) check `size`.
             }
             Ok(r) => {
-                let size = cx[v].ty(cx).bit_size().unwrap();
                 let v32 = match size {
                     B32 => v,
-                    B64 => cx.a(Node::Trunc(B32, v)),
+                    B64 => {
+                        return Err(Mips64OpNotSupportedOnMips32::RegWrite {
+                            name: &cx[cx[isa.regs[r]].name],
+                        })
+                    }
                     _ => unreachable!(),
                 };
-                self.set(cx, isa.regs32[r], v32);
-                if size == B64 {
-                    self.set(
-                        cx,
-                        isa.regs64_upper[r],
-                        cx.a(Node::Trunc(
-                            B32,
-                            cx.a(Node::Int(IntOp::ShrU, B64, v, cx.a(Const::new(B8, 32)))),
-                        )),
-                    );
-                }
+                self.set(cx, isa.regs[r], v32);
             }
         }
+        Ok(())
     }
 }
 
@@ -259,7 +265,9 @@ impl Isa for Mips32 {
 
         macro_rules! link {
             ($r:expr) => {
-                state.mips32_set(self, cx, $r, cx.a(add4(*pc)))
+                state
+                    .mips32_set(self, cx, $r, cx.a(add4(*pc)))
+                    .expect("hardcoded 32-bit `pc`, not using `size`")
             };
             () => {
                 link!(31)
@@ -363,15 +371,22 @@ impl Isa for Mips32 {
             };
         }
 
+        // FIXME(eddyb) audit everything that ever interacts with this `size`.
         let mut size = B32;
         macro_rules! get_reg_maybe64 {
             ($r:expr) => {
-                state.mips32_get(self, cx, $r, size)
+                match state.mips32_get(self, cx, $r, size) {
+                    Ok(v) => v,
+                    Err(e) => error!("attempted {}", e),
+                }
             };
         }
         macro_rules! set_reg_maybe64 {
             ($r:expr, $val:expr) => {
-                state.mips32_set(self, cx, $r, $val)
+                match state.mips32_set(self, cx, $r, $val) {
+                    Ok(()) => {}
+                    Err(e) => error!("attempted {}", e),
+                }
             };
         }
 
@@ -397,12 +412,6 @@ impl Isa for Mips32 {
 
             if let 20 | 22 | 23 | 28..=31 | 44..=47 | 56 | 58..=60 | 62 | 63 = funct {
                 // HACK(eddyb) force `{get,set}_reg_maybe64` below into 64-bit mode.
-                size = B64;
-            }
-
-            if let 16..=19 = funct {
-                // HACK(eddyb) unlike the above, these aren't 64-bit instructions,
-                // but the whole value does need to be copied, in case it's used.
                 size = B64;
             }
 
@@ -481,7 +490,9 @@ impl Isa for Mips32 {
         } else if op == 1 {
             // REGIMM (I format w/o rt).
             let rs_was_zero = rs == 0;
-            let rs = state.mips32_get(self, cx, rs, B32);
+            let rs = state
+                .mips32_get(self, cx, rs, B32)
+                .expect("hardcoded `B32`, not using `size`");
             match rt {
                 0 | 16 => {
                     if (rt & 16) != 0 {
@@ -556,7 +567,9 @@ impl Isa for Mips32 {
             }
 
             let rd = rt;
-            let rs = state.mips32_get(self, cx, rs, B32);
+            let rs = state
+                .mips32_get(self, cx, rs, B32)
+                .expect("hardcoded `B32`, not using `size`");
             let rt = get_reg_maybe64!(rt);
 
             macro_rules! mem_ref {
@@ -603,20 +616,34 @@ impl Isa for Mips32 {
                     if cx[v].ty(cx) == Type::Bits(B1) {
                         v = node!(Zext(B32, v));
                     }
-                    state.mips32_set(self, cx, rd, v);
+                    state
+                        .mips32_set(self, cx, rd, v)
+                        .expect("hardcoded `B32`, not using `size`");
                 }
-                15 => state.mips32_set(
-                    self,
-                    cx,
-                    rd,
-                    cx.a(Const::new(B32, (imm.as_u32() << 16) as u64)),
-                ),
+                15 => state
+                    .mips32_set(
+                        self,
+                        cx,
+                        rd,
+                        cx.a(Const::new(B32, (imm.as_u32() << 16) as u64)),
+                    )
+                    .expect("hardcoded `B32`, not using `size`"),
 
-                32 => state.mips32_set(self, cx, rd, node!(Sext(B32, node!(Load(mem_ref!(M8)))))),
-                33 => state.mips32_set(self, cx, rd, node!(Sext(B32, node!(Load(mem_ref!(M16)))))),
-                35 => state.mips32_set(self, cx, rd, node!(Load(mem_ref!(M32)))),
-                36 => state.mips32_set(self, cx, rd, node!(Zext(B32, node!(Load(mem_ref!(M8)))))),
-                37 => state.mips32_set(self, cx, rd, node!(Zext(B32, node!(Load(mem_ref!(M16)))))),
+                32 => state
+                    .mips32_set(self, cx, rd, node!(Sext(B32, node!(Load(mem_ref!(M8))))))
+                    .expect("hardcoded `B32`, not using `size`"),
+                33 => state
+                    .mips32_set(self, cx, rd, node!(Sext(B32, node!(Load(mem_ref!(M16))))))
+                    .expect("hardcoded `B32`, not using `size`"),
+                35 => state
+                    .mips32_set(self, cx, rd, node!(Load(mem_ref!(M32))))
+                    .expect("hardcoded `M32`, not using `size`"),
+                36 => state
+                    .mips32_set(self, cx, rd, node!(Zext(B32, node!(Load(mem_ref!(M8))))))
+                    .expect("hardcoded `B32`, not using `size`"),
+                37 => state
+                    .mips32_set(self, cx, rd, node!(Zext(B32, node!(Load(mem_ref!(M16))))))
+                    .expect("hardcoded `B32`, not using `size`"),
 
                 40 => state.set(
                     cx,
@@ -639,7 +666,7 @@ impl Isa for Mips32 {
                                 "CACHE(op={}, base={}, imm={:?})",
                                 field(16, 5),
                                 Reg::try_from(field(21, 5))
-                                    .map(|r| &cx[cx[self.regs32[r]].name])
+                                    .map(|r| &cx[cx[self.regs[r]].name])
                                     .unwrap_or_else(|ZeroReg| "zero"),
                                 imm,
                             ),
@@ -660,7 +687,7 @@ impl Isa for Mips32 {
                                 if (op & 4) == 0 { 'W' } else { 'D' },
                                 rd,
                                 Reg::try_from(field(21, 5))
-                                    .map(|r| &cx[cx[self.regs32[r]].name])
+                                    .map(|r| &cx[cx[self.regs[r]].name])
                                     .unwrap_or_else(|ZeroReg| "zero"),
                                 imm
                             ),
