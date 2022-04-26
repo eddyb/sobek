@@ -3,13 +3,14 @@ use crate::ir::{
     Visit, Visitor,
 };
 use crate::platform::Platform;
-use itertools::Either;
+use itertools::{Either, Itertools};
+use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fmt;
 use std::io::Write;
 use std::mem;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::{fmt, iter};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Set1<T> {
@@ -315,12 +316,12 @@ impl INode {
 }
 
 /// Options for handling an exit "continuation".
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 struct ExitOptions {
-    /// Argument value for the exit "continuation".
-    /// If present, will be back-propagated from
-    /// all the jumps to the exit "continuation".
-    arg_value: Option<INode>,
+    /// Argument values for the exit "continuation".
+    /// These will be back-propagated through jumps, to the exit "continuation".
+    // FIXME(eddyb) `SmallVec` doesn't seem to be faster than `Vec`?!
+    args_values: SmallVec<[INode; 4]>,
 }
 
 struct Partial {
@@ -337,10 +338,11 @@ struct Exit {
     /// eventually reaching infinite loops and/or traps.
     targets: Set1<INode>,
 
-    /// Set of "continuation argument" values.
-    /// Only empty if no argument was provided (see `ExitKey`).
+    /// One set of values per "continuation argument".
+    /// Must be the same length as the `args_values` in `ExitOptions`.
     // TODO(eddyb) should this be per `targets` value?
-    arg_values: Set1<INode>,
+    // FIXME(eddyb) `SmallVec` doesn't seem to be faster than `Vec`?!
+    args_values: SmallVec<[Set1<INode>; 4]>,
 
     /// Indicates whether this (sub-)CFG contains unresolved
     /// cycles, which may have resulted in the computed exit
@@ -362,7 +364,12 @@ impl Exit {
         }
         Exit {
             targets: self.targets.union(other.targets),
-            arg_values: self.arg_values.union(other.arg_values),
+            args_values: self
+                .args_values
+                .into_iter()
+                .zip_eq(other.args_values)
+                .map(|(a, b)| a.union(b))
+                .collect(),
             partial: self.partial.or(other.partial),
         }
     }
@@ -547,7 +554,7 @@ impl<'a> Explorer<'a> {
     pub fn explore_bbs(&mut self, entry_pc: Const) {
         let entry_bb = BlockId::from(entry_pc);
 
-        let exit = self.find_exit(entry_bb, ExitOptions::default());
+        let exit = self.find_exit(entry_bb, &ExitOptions::default());
         exit.targets.map(|target| {
             println!(
                 "explore: entry {:?} reaches unknown exit target {}",
@@ -560,20 +567,28 @@ impl<'a> Explorer<'a> {
     fn find_exit_uncached_on_edge(
         &mut self,
         bb: BlockId,
-        options: ExitOptions,
+        options: &ExitOptions,
         br_cond: Option<bool>,
         direct_target: INode,
     ) -> Exit {
-        let mut exit = Exit {
-            targets: Set1::One(direct_target),
-            arg_values: options.arg_value.map_or(Set1::Empty, |arg_value| {
-                Set1::One(
-                    arg_value
-                        .subst_reduce(self, Some(&self.blocks[&bb].edges.as_ref()[br_cond].state)),
-                )
-            }),
-            partial: None,
-        };
+        let mut exit =
+            Exit {
+                targets: Set1::One(direct_target),
+
+                // FIXME(eddyb) compute this lazily? (it may not be used)
+                args_values: options
+                    .args_values
+                    .iter()
+                    .map(|&arg_value| {
+                        Set1::One(arg_value.subst_reduce(
+                            self,
+                            Some(&self.blocks[&bb].edges.as_ref()[br_cond].state),
+                        ))
+                    })
+                    .collect(),
+
+                partial: None,
+            };
 
         // HACK(eddyb) this uses a stack of targets to be able to handle a chain
         // of exit continuations, all resolved by `bb` simultaneously.
@@ -592,11 +607,12 @@ impl<'a> Explorer<'a> {
 
             // HACK(eddyb) detect trivial fixpoints/cycles.
             if stack.last() == Some(&target_bb) {
-                let arg_values_is_const = match exit.arg_values {
-                    Set1::Empty | Set1::Many => true,
-                    Set1::One(value) => self.cx[value].as_const().is_some(),
-                };
-                if arg_values_is_const {
+                let all_args_values_are_const =
+                    exit.args_values.iter().all(|&arg_values| match arg_values {
+                        Set1::Empty | Set1::Many => true,
+                        Set1::One(value) => self.cx[value].as_const().is_some(),
+                    });
+                if all_args_values_are_const {
                     exit.targets = Set1::Empty;
                     return exit;
                 }
@@ -616,52 +632,99 @@ impl<'a> Explorer<'a> {
             let target_exit = self.find_exit(target_bb, options);
             // FIXME(eddyb) abstract composing `partial`s better.
             exit.partial = exit.partial.or(target_exit.partial);
-            let mut resolve_values = |values: Set1<INode>| {
-                values.flat_map(|value| {
-                    // Constants don't need any propagation work.
-                    if self.cx[value].as_const().is_some() {
-                        return Set1::One(value);
-                    }
-
-                    // Reuse the already computed `arg_values` where possible.
-                    if Some(value) == options.arg_value {
-                        return exit.arg_values;
-                    }
-
-                    let mut values = Set1::One(value);
-                    for &frame_bb in stack.iter().rev() {
-                        values = values.flat_map(|value| {
-                            let frame_exit = self.find_exit(
-                                frame_bb,
-                                ExitOptions {
-                                    arg_value: Some(value),
-                                },
-                            );
-                            exit.partial = exit.partial.take().or(frame_exit.partial);
-                            frame_exit.arg_values
+            let mut resolve_values = |all_values: &mut SmallVec<[Set1<INode>; 4]>| {
+                // FIXME(eddyb) disabled because of potential overhead, must
+                // measure before turning it back on! (especially as it's doing
+                // some really inefficient searches... should build a map!)
+                if false {
+                    // Reuse the already computed `args_values` where possible.
+                    let all_const_or_in_args_values =
+                        all_values.iter().all(|&values| match values {
+                            Set1::Empty | Set1::Many => true,
+                            Set1::One(v) => {
+                                self.cx[v].as_const().is_some() || options.args_values.contains(&v)
+                            }
                         });
+                    if all_const_or_in_args_values {
+                        for values in all_values {
+                            *values = (*values).flat_map(|value| {
+                                exit.args_values[options
+                                    .args_values
+                                    .iter()
+                                    .position(|&a| a == value)
+                                    .unwrap()]
+                            });
+                        }
+                        return;
                     }
-                    values.map(|arg_value| {
-                        arg_value.subst_reduce(
+                }
+
+                for &frame_bb in stack.iter().rev() {
+                    // Common closure to avoid mismatching when filtering down
+                    // all the `Set1<INode>` to just the `INode`s, to resolve.
+                    let resolvable_all_values_slot = |&slot: &Set1<INode>| match slot {
+                        Set1::Empty | Set1::Many => None,
+                        Set1::One(v) => {
+                            // Constants don't need any propagation work.
+                            if self.cx[v].as_const().is_some() {
+                                return None;
+                            }
+
+                            Some(v)
+                        }
+                    };
+                    let resolvable_values: SmallVec<[INode; 4]> = all_values
+                        .iter()
+                        .filter_map(resolvable_all_values_slot)
+                        .collect();
+                    let resolvable_values_mut = all_values
+                        .iter_mut()
+                        .filter(|slot| resolvable_all_values_slot(slot).is_some());
+                    if !resolvable_values.is_empty() {
+                        let frame_exit = self.find_exit(
+                            frame_bb,
+                            &ExitOptions {
+                                args_values: resolvable_values,
+                            },
+                        );
+                        exit.partial = exit.partial.take().or(frame_exit.partial);
+
+                        for (slot, frame_resolved) in
+                            resolvable_values_mut.zip_eq(frame_exit.args_values)
+                        {
+                            *slot = frame_resolved;
+                        }
+                    }
+                }
+                for values in all_values {
+                    *values = values.map(|value| {
+                        value.subst_reduce(
                             self,
                             Some(&self.blocks[&bb].edges.as_ref()[br_cond].state),
                         )
-                    })
-                })
+                    });
+                }
             };
 
-            let (targets, arg_values) = (
-                resolve_values(target_exit.targets),
-                resolve_values(target_exit.arg_values),
-            );
+            let mut args_values_and_targets = target_exit
+                .args_values
+                .iter()
+                .copied()
+                .chain([target_exit.targets])
+                .collect();
+            resolve_values(&mut args_values_and_targets);
+
+            let targets = args_values_and_targets.pop().unwrap();
+            let args_values = args_values_and_targets;
+
             exit.targets = targets;
-            exit.arg_values = arg_values;
+            exit.args_values = args_values;
 
             stack.push(target_bb);
         }
     }
 
-    fn find_exit_uncached(&mut self, bb: BlockId, options: ExitOptions) -> Exit {
+    fn find_exit_uncached(&mut self, bb: BlockId, options: &ExitOptions) -> Exit {
         let cx = self.cx;
         self.get_or_lift_block(bb);
 
@@ -691,7 +754,10 @@ impl<'a> Explorer<'a> {
                     .fold(
                         Exit {
                             targets: Set1::Empty,
-                            arg_values: Set1::Empty,
+                            // FIXME(eddyb) avoid preallocating here somehow.
+                            args_values: iter::repeat(Set1::Empty)
+                                .take(options.args_values.len())
+                                .collect(),
                             partial: None,
                         },
                         |a, b| a.merge(cx, bb, b),
@@ -701,13 +767,16 @@ impl<'a> Explorer<'a> {
     }
 
     // FIXME(eddyb) reuse cached value when it doesn't interact with `options`.
-    fn find_exit(&mut self, bb: BlockId, options: ExitOptions) -> Exit {
-        match self.exit_cache.entry((bb, options)) {
+    fn find_exit(&mut self, bb: BlockId, options: &ExitOptions) -> Exit {
+        // FIXME(eddyb) avoid cloning here, perhaps by allocating `ExitOptions`
+        // in an `elsa::FrozenVec`, since it's kept alive by the cache anyway.
+        match self.exit_cache.entry((bb, options.clone())) {
             Entry::Occupied(mut entry) => {
                 let cached = entry.get_mut();
                 return Exit {
                     targets: cached.targets,
-                    arg_values: cached.arg_values,
+                    // FIXME(eddyb) avoid cloning here (keep it in an `Rc`?).
+                    args_values: cached.args_values.clone(),
                     partial: cached.partial.as_mut().map(|partial| {
                         partial.observed = true;
                         Partial { observed: false }
@@ -717,7 +786,10 @@ impl<'a> Explorer<'a> {
             Entry::Vacant(entry) => {
                 entry.insert(Exit {
                     targets: Set1::Empty,
-                    arg_values: Set1::Empty,
+                    // FIXME(eddyb) avoid preallocating here somehow.
+                    args_values: iter::repeat(Set1::Empty)
+                        .take(options.args_values.len())
+                        .collect(),
                     partial: Some(Partial { observed: false }),
                 });
             }
@@ -728,7 +800,7 @@ impl<'a> Explorer<'a> {
         // It *might* be the case that not caching a partial value
         // (i.e. the `entry.remove()` call) has a similar effect?
         loop {
-            let mut exit = self.find_exit_uncached(bb, options);
+            let mut exit = self.find_exit_uncached(bb, &options);
 
             // HACK(eddyb) find a more principled place to stick this in.
             if let Some(cancel_token) = self.cancel_token {
@@ -742,13 +814,16 @@ impl<'a> Explorer<'a> {
                 exit.partial = None;
             }
 
-            let mut entry = match self.exit_cache.entry((bb, options)) {
+            // FIXME(eddyb) avoid cloning here, perhaps by allocating `ExitOptions`
+            // in an `elsa::FrozenVec`, since it's kept alive by the cache anyway.
+            let mut entry = match self.exit_cache.entry((bb, options.clone())) {
                 Entry::Occupied(entry) => entry,
                 Entry::Vacant(_) => unreachable!(),
             };
             let cached = entry.get_mut();
             let old_targets = mem::replace(&mut cached.targets, exit.targets);
-            let old_arg_values = mem::replace(&mut cached.arg_values, exit.arg_values);
+            // FIXME(eddyb) avoid cloning here (keep it in an `Rc`?).
+            let old_args_values = mem::replace(&mut cached.args_values, exit.args_values.clone());
             let old_observed = mem::replace(&mut cached.partial.as_mut().unwrap().observed, false);
 
             // Keep retrying as long as a now-obsolete `targets` / `arg_values` were observed.
@@ -773,8 +848,11 @@ impl<'a> Explorer<'a> {
                 (_, Set1::Empty) | (Set1::Many, _) => unreachable!(),
             };
             // Always check for progress, to ensure the sanity checks run.
-            let progress =
-                progress(old_targets, exit.targets) | progress(old_arg_values, exit.arg_values);
+            let progress = progress(old_targets, exit.targets)
+                | old_args_values
+                    .iter()
+                    .zip_eq(&exit.args_values)
+                    .any(|(&old, &new)| progress(old, new));
             if old_observed && progress {
                 continue;
             }
