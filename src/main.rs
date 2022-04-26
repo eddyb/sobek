@@ -2,7 +2,7 @@ use sobek::explore::Explorer;
 use sobek::ir::{Const, Cx};
 use sobek::isa::i8051::I8051;
 use sobek::isa::i8080::I8080;
-use sobek::isa::mips::Mips32;
+use sobek::isa::mips::Mips;
 use sobek::platform::{n64, unix, Platform};
 use sobek::platform::{RawRom, SimplePlatform};
 use std::ops::Range;
@@ -151,7 +151,17 @@ fn main(mut args: Args) -> std::io::Result<()> {
             let exe = unix::Executable::load_at_virtual_addr(rom, 0x7000_0000);
             args.entry.push(exe.virtual_entry);
             analyze_and_dump(args, |cx| SimplePlatform {
-                isa: Mips32::new_le(cx),
+                isa: Mips::new_32le(cx),
+                rom: exe,
+            });
+        }
+        "mips64el-linux" => {
+            // FIXME(eddyb) symbolic load addresses would be ideal here,
+            // arbitrarily recognizable constant used instead for now.
+            let exe = unix::Executable::load_at_virtual_addr(rom, 0x0070_0000_0000);
+            args.entry.push(exe.virtual_entry);
+            analyze_and_dump(args, |cx| SimplePlatform {
+                isa: Mips::new_64le(cx),
                 rom: exe,
             });
         }
