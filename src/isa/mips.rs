@@ -242,17 +242,6 @@ impl State {
     }
 }
 
-// HACK(eddyb) this papers over the lack of noop `Trunc`/`{S,Z}ext` (i.e. the
-// size must shrink for `Trunc`, and grow for `{S,Z}ext`, currently), which
-// would provide a more direct way to implement such "noop or sext" situations.
-fn i32_to_b32_or_sext64(size: BitSize, x: i32) -> Const {
-    match size {
-        B32 => Const::new(B32, x as u32 as u64),
-        B64 => Const::new(B64, x as i64 as u64),
-        _ => unreachable!(),
-    }
-}
-
 impl Isa for Mips {
     fn mem_containing_rom(&self) -> IGlobal {
         self.mem
@@ -275,21 +264,20 @@ impl Isa for Mips {
         }
 
         let instr = match rom.load(self.mem_type, *pc, MemSize::M32) {
-            Ok(x) => x.as_u32(),
+            Ok(x) => x,
             Err(e) => error!("failed to read ROM: {:?}", e),
         };
         let add4 = |x| IntOp::Add.eval(x, Const::new(x.size, 4)).unwrap();
         *pc = add4(*pc);
 
-        let field = |i, w| (instr >> i) & ((1u32 << w) - 1u32);
+        let field = |i, w| (instr.as_u32() >> i) & ((1u32 << w) - 1u32);
 
-        let op = instr >> 26;
+        let op = field(26, 6);
         let (rs, rt, rd) = {
             let r = |i| field(11 + 5 * i, 5);
             (r(2), r(1), r(0))
         };
-        let imm32 = Const::new(B32, instr as i16 as i32 as u32 as u64);
-        let uimm32 = Const::new(B32, instr as u16 as u64);
+        let imm16 = instr.trunc(B16);
 
         macro_rules! node {
             ($name:ident($($arg:expr),*)) => {
@@ -360,7 +348,8 @@ impl Isa for Mips {
                 cx.a(IntOp::Add
                     .eval(
                         *pc,
-                        i32_to_b32_or_sext64(self.mem_type.addr_size, imm32.as_i32() << 2),
+                        Const::new(B32, (imm16.sext(B32).as_u32() << 2) as u64)
+                            .sext(self.mem_type.addr_size),
                     )
                     .unwrap())
             };
@@ -667,10 +656,7 @@ impl Isa for Mips {
                             IntOp::Add,
                             self.mem_type.addr_size,
                             get_reg_native!(rs),
-                            cx.a(i32_to_b32_or_sext64(
-                                self.mem_type.addr_size,
-                                imm32.as_i32()
-                            ))
+                            cx.a(imm16.sext(self.mem_type.addr_size))
                         )),
                         size: MemSize::$sz,
                     }
@@ -719,11 +705,11 @@ impl Isa for Mips {
                         _ => unreachable!(),
                     };
                     // HACK(eddyb) pick sign- or zero-extension based on op.
-                    let imm = match op {
-                        IntOp::And | IntOp::Or | IntOp::Xor => uimm32,
-                        _ => imm32,
+                    let imm32 = match op {
+                        IntOp::And | IntOp::Or | IntOp::Xor => imm16.zext(B32),
+                        _ => imm16.sext(B32),
                     };
-                    let imm = i32_to_b32_or_sext64(alu_size, imm.as_i32());
+                    let imm = imm32.sext(alu_size);
 
                     let rs = get_reg_alu_input!(rs);
                     let mut v = node!(Int(op, alu_size, rs, cx.a(imm)));
@@ -732,7 +718,7 @@ impl Isa for Mips {
                     }
                     set_reg_alu_output!(rd, v);
                 }
-                15 => set_reg_alu_output!(rd, cx.a(Const::new(B32, (imm32.as_u32() << 16) as u64))),
+                15 => set_reg_alu_output!(rd, cx.a(Const::new(B32, (imm16.as_u32() << 16) as u64))),
 
                 32 => set_reg_alu_output!(rd, node!(Sext(B32, node!(Load(mem_ref!(M8)))))),
                 33 => set_reg_alu_output!(rd, node!(Sext(B32, node!(Load(mem_ref!(M16)))))),
@@ -763,7 +749,7 @@ impl Isa for Mips {
                                 Reg::try_from(field(21, 5))
                                     .map(|r| &cx[cx[self.regs[r]].name])
                                     .unwrap_or_else(|ZeroReg| "zero"),
-                                imm32,
+                                imm16,
                             ),
                             next_pc: cx.a(*pc),
                         },
@@ -784,7 +770,7 @@ impl Isa for Mips {
                                 Reg::try_from(field(21, 5))
                                     .map(|r| &cx[cx[self.regs[r]].name])
                                     .unwrap_or_else(|ZeroReg| "zero"),
-                                imm32
+                                imm16,
                             ),
                             next_pc: cx.a(*pc),
                         },

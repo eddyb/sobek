@@ -237,8 +237,7 @@ impl Isa for I8051 {
         }
         macro_rules! relative_target {
             () => {{
-                // FIXME(eddyb) impl `From<iN>` for `Const` already!
-                let offset = Const::new(B16, imm!(8).as_i8() as i16 as u16 as u64);
+                let offset = imm!(8).sext(B16);
                 cx.a(IntOp::Add.eval(*pc, offset).unwrap())
             }};
         }

@@ -24,7 +24,7 @@ impl<R: Deref<Target = [u8]>> Cartridge<R> {
         // Sign-extend to a 64-bit address to preserve address decoding properties.
         // FIXME(eddyb) it might be better to have a forced 32-bit-addresses
         // 64-bit registers MIPS mode, and always truncate addr on load/store.
-        let base = Const::new(BitSize::B64, base32.as_i32() as i64 as u64);
+        let base = base32.sext(BitSize::B64);
         Cartridge { raw, base }
     }
 
@@ -36,16 +36,18 @@ impl<R: Deref<Target = [u8]>> Cartridge<R> {
     ) -> Result<Const, UnsupportedAddress> {
         // FIXME(eddyb) do this only once.
         // FIXME(eddyb) use `decode_virtual_addr64` when it becomes available.
-        let (base_addr_space, base) = Mips::decode_virtual_addr32({
-            let virtual_addr64 = self.base.as_u64();
-            let virtual_addr32 = virtual_addr64 as u32;
+        let (base_addr_space, base) = {
+            let virtual_addr64 = self.base.sext(BitSize::B64);
+            let virtual_addr32 = self.base.trunc(BitSize::B32);
+
             // FIXME(eddyb) support addresses other than the 32->64 compatibility
             // subset (i.e. a sign-extended 32-bit address).
-            if virtual_addr32 as i32 as i64 as u64 != virtual_addr64 {
+            if virtual_addr32.sext(BitSize::B64) != virtual_addr64 {
                 return Err(UnsupportedAddress(addr));
             }
-            virtual_addr32
-        });
+
+            Mips::decode_virtual_addr32(virtual_addr32.as_u32())
+        };
         assert_eq!(base_addr_space, AddrSpace::Direct { cached: true });
 
         match addr.as_u32() {
@@ -68,21 +70,24 @@ impl<R: Deref<Target = [u8]>> Rom for Cartridge<R> {
         size: MemSize,
     ) -> Result<Const, UnsupportedAddress> {
         let err = UnsupportedAddress(addr);
+
         // FIXME(eddyb) use `decode_virtual_addr64` when it becomes available.
-        let (addr_space, addr) = Mips::decode_virtual_addr32({
-            let virtual_addr64 = addr.as_u64();
-            let virtual_addr32 = virtual_addr64 as u32;
+        let (addr_space, addr) = {
+            let virtual_addr64 = addr.sext(BitSize::B64);
+            let virtual_addr32 = addr.trunc(BitSize::B32);
+
             // FIXME(eddyb) support addresses other than the 32->64 compatibility
             // subset (i.e. a sign-extended 32-bit address).
-            if virtual_addr32 as i32 as i64 as u64 != virtual_addr64 {
+            if virtual_addr32.sext(BitSize::B64) != virtual_addr64 {
                 return Err(UnsupportedAddress(addr));
             }
-            virtual_addr32
-        });
+
+            let (addr_space, addr) = Mips::decode_virtual_addr32(virtual_addr32.as_u32());
+            (addr_space, Const::new(BitSize::B32, addr as u64))
+        };
+
         match addr_space {
-            AddrSpace::Direct { .. } => self
-                .load_physical(mem_type, Const::new(BitSize::B32, addr as u64), size)
-                .map_err(|_| err),
+            AddrSpace::Direct { .. } => self.load_physical(mem_type, addr, size).map_err(|_| err),
             AddrSpace::Mapped(_) => Err(err),
         }
     }

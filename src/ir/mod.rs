@@ -93,6 +93,7 @@ impl From<bool> for Const {
 }
 
 impl Const {
+    #[track_caller]
     pub fn new(size: BitSize, bits: u64) -> Self {
         assert!(
             bits == (bits & size.mask()),
@@ -104,38 +105,79 @@ impl Const {
         Const { size, bits }
     }
 
-    pub fn as_i8(&self) -> i8 {
+    pub fn as_i8(self) -> i8 {
         self.as_i64() as i8
     }
 
-    pub fn as_u8(&self) -> u8 {
+    pub fn as_u8(self) -> u8 {
         self.as_u64() as u8
     }
 
-    pub fn as_i16(&self) -> i16 {
+    pub fn as_i16(self) -> i16 {
         self.as_i64() as i16
     }
 
-    pub fn as_u16(&self) -> u16 {
+    pub fn as_u16(self) -> u16 {
         self.as_u64() as u16
     }
 
-    pub fn as_i32(&self) -> i32 {
+    pub fn as_i32(self) -> i32 {
         self.as_i64() as i32
     }
 
-    pub fn as_u32(&self) -> u32 {
+    pub fn as_u32(self) -> u32 {
         self.as_u64() as u32
     }
 
-    pub fn as_i64(&self) -> i64 {
-        let n = 64 - self.size.bits();
-        (self.bits as i64) << n >> n
+    pub fn as_i64(self) -> i64 {
+        self.sext(BitSize::B64).bits as i64
     }
 
-    pub fn as_u64(&self) -> u64 {
+    pub fn as_u64(self) -> u64 {
+        self.zext(BitSize::B64).bits
+    }
+
+    // FIXME(eddyb) these are effectively like an unary version of `IntOp`, they
+    // should probably be grouped into such an abstraction instead of being here.
+
+    /// Truncate the constant down to `size` bits.
+    #[track_caller]
+    pub fn trunc(self, size: BitSize) -> Self {
+        assert!(
+            self.size >= size,
+            "Const::trunc({:?}, {:?} -> {:?}): size should not increase",
+            self,
+            self.size,
+            size
+        );
+        Const::new(size, self.bits & size.mask())
+    }
+
+    /// Sign-extend the constant up to `size` bits.
+    #[track_caller]
+    pub fn sext(self, size: BitSize) -> Self {
+        assert!(
+            self.size <= size,
+            "Const::sext({:?}, {:?} -> {:?}): size should not decreate",
+            self,
+            self.size,
+            size
+        );
         let n = 64 - self.size.bits();
-        self.bits << n >> n
+        Const::new(size, (((self.bits as i64) << n >> n) as u64) & size.mask())
+    }
+
+    /// Zero-extend the constant up to `size` bits.
+    #[track_caller]
+    pub fn zext(self, size: BitSize) -> Self {
+        assert!(
+            self.size <= size,
+            "Const::zext({:?}, {:?} -> {:?}): size should not decreate",
+            self,
+            self.size,
+            size
+        );
+        Const::new(size, self.bits)
     }
 }
 
@@ -832,10 +874,15 @@ impl Node {
         // FIXME(eddyb) deduplicate these
         if let Node::Trunc(size, x) = self {
             let x_size = cx[x].ty(cx).bit_size().unwrap();
-            assert!(size < x_size);
+            assert!(size <= x_size);
+
+            // Simplify noops.
+            if size == x_size {
+                return Err(x);
+            }
 
             if let Some(c) = cx[x].as_const() {
-                return Ok(Node::Const(Const::new(size, c.as_u64() & size.mask())));
+                return Ok(Node::Const(c.trunc(size)));
             }
 
             // HACK(eddyb) replace `trunc({s,z}ext(y))` with something simpler.
@@ -858,22 +905,29 @@ impl Node {
 
         if let Node::Sext(size, x) = self {
             let x_size = cx[x].ty(cx).bit_size().unwrap();
-            assert!(size > x_size);
+            assert!(size >= x_size);
+
+            // Simplify noops.
+            if size == x_size {
+                return Err(x);
+            }
 
             if let Some(c) = cx[x].as_const() {
-                return Ok(Node::Const(Const::new(
-                    size,
-                    (c.as_i64() as u64) & size.mask(),
-                )));
+                return Ok(Node::Const(c.sext(size)));
             }
         }
 
         if let Node::Zext(size, x) = self {
             let x_size = cx[x].ty(cx).bit_size().unwrap();
-            assert!(size > x_size);
+            assert!(size >= x_size);
+
+            // Simplify noops.
+            if size == x_size {
+                return Err(x);
+            }
 
             if let Some(c) = cx[x].as_const() {
-                return Ok(Node::Const(Const::new(size, c.as_u64())));
+                return Ok(Node::Const(c.zext(size)));
             }
 
             // HACK(eddyb) replace `zext(trunc(y))` by `y & mask`.
