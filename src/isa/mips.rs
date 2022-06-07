@@ -653,6 +653,49 @@ impl Isa for Mips {
                     next_pc: cx.a(*pc),
                 },
             }));
+        } else if op == 28 {
+            // SPECIAL2.
+            let funct = field(0, 6);
+            match funct {
+                _ => error!("unknown SPECIAL2 funct={} (0b{0:06b} / 0x{0:02x})", funct),
+            }
+        } else if op == 31 {
+            // SPECIAL3.
+            let funct = field(0, 6);
+
+            if let 1..=3 | 5..=7 | 36 | 39 | 55 = funct {
+                // HACK(eddyb) force `{get,set}_reg_alu_{input,output}` below into 64-bit mode.
+                alu_size = B64;
+            }
+
+            let rs = get_reg_alu_input!(rs);
+
+            let v = match funct {
+                2 | 3 => {
+                    let lsb = field(6, 5)
+                        + match funct {
+                            2 => 32,
+                            3 => 0,
+                            _ => unreachable!(),
+                        };
+                    let msbd = rd;
+                    let size = msbd + 1;
+                    let mask = !0u64 >> (64 - size);
+                    node!(Int(
+                        IntOp::And,
+                        alu_size,
+                        node!(Int(
+                            IntOp::ShrU,
+                            alu_size,
+                            rs,
+                            cx.a(Const::new(B32, lsb as u64))
+                        )),
+                        cx.a(Const::new(alu_size, mask))
+                    ))
+                }
+                _ => error!("unknown SPECIAL3 funct={} (0b{0:06b} / 0x{0:02x})", funct),
+            };
+            set_reg_alu_output!(rt, v);
         } else {
             // I format.
 
