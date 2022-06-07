@@ -16,22 +16,30 @@ pub struct Mips {
 
 impl Mips {
     pub fn new_32le(cx: &Cx) -> Self {
-        Self::new(cx, B32, false)
-    }
-    pub fn new_32be(cx: &Cx) -> Self {
-        Self::new(cx, B32, true)
+        Self::new_le(cx, B32)
     }
     pub fn new_64le(cx: &Cx) -> Self {
-        Self::new(cx, B64, false)
+        Self::new_le(cx, B64)
     }
-    pub fn new_64be(cx: &Cx) -> Self {
-        Self::new(cx, B64, true)
+    fn new_le(cx: &Cx, reg_size: BitSize) -> Self {
+        Self::new(
+            cx,
+            reg_size,
+            MemType {
+                addr_size: reg_size,
+                big_endian: false,
+            },
+        )
     }
-    fn new(cx: &Cx, reg_size: BitSize, big_endian: bool) -> Self {
-        let mem_type = MemType {
-            addr_size: reg_size,
-            big_endian,
-        };
+
+    pub fn new(cx: &Cx, reg_size: BitSize, mem_type: MemType) -> Self {
+        // Only 32-bit and 64-bit variants/modes of MIPS are supported.
+        assert!(matches!(reg_size, B32 | B64));
+        assert!(matches!(mem_type.addr_size, B32 | B64));
+
+        // Memory accesses can only at most truncate addresses, not widen them.
+        assert!(mem_type.addr_size <= reg_size);
+
         Mips {
             mem: cx.a(Global {
                 ty: Type::Mem(mem_type),
@@ -290,7 +298,7 @@ impl Isa for Mips {
             ($r:expr) => {
                 state
                     .mips_get_reg_with_explicit_size(self, cx, $r, self.regs.size)
-                    .expect("get_reg_native forces `regs.size`, instead of `alu_size`")
+                    .expect("get_reg_native forces `regs.size`, should always work")
             };
         }
         // Write the width width of a register.
@@ -298,13 +306,22 @@ impl Isa for Mips {
             ($r:expr, $val:expr) => {
                 state
                     .mips_set_reg_with_explicit_size(self, cx, $r, $val, self.regs.size)
-                    .expect("set_reg_native forces `regs.size`, instead of `alu_size`")
+                    .expect("set_reg_native forces `regs.size`, should always work")
+            };
+        }
+
+        // Read a register as a memory address (may be smaller than register size).
+        macro_rules! get_reg_mem_addr {
+            ($r:expr) => {
+                state
+                    .mips_get_reg_with_explicit_size(self, cx, $r, self.mem_type.addr_size)
+                    .expect("get_reg_mem_addr forces `addr_size`, should always work")
             };
         }
 
         macro_rules! link {
             ($r:expr) => {
-                set_reg_native!($r, cx.a(add4(*pc)))
+                set_reg_native!($r, cx.a(add4(*pc).sext(self.regs.size)))
             };
             () => {
                 link!(31)
@@ -456,9 +473,14 @@ impl Isa for Mips {
                 alu_size = B64;
             }
 
-            if let 8 | 9 | 16..=19 | 36..=39 | 42 | 43 = funct {
+            if let 16..=19 | 36..=39 | 42 | 43 = funct {
                 // HACK(eddyb) force `{get,set}_reg_alu_{input,output}` below into "native" mode.
                 alu_size = self.regs.size;
+            }
+
+            if let 8 | 9 = funct {
+                // HACK(eddyb) force `get_reg_alu_input` below into "memory address" mode.
+                alu_size = self.mem_type.addr_size;
             }
 
             let rs = get_reg_alu_input!(rs);
@@ -593,7 +615,7 @@ impl Isa for Mips {
                 link!();
             }
             return jump!(cx.a(Const::new(
-                self.regs.size,
+                self.mem_type.addr_size,
                 (pc.as_u64() & !0x3fff_ffff) | ((field(0, 26) << 2) as u64)
             )));
         } else if (op, rs, rt) == (4, 0, 0) {
@@ -655,7 +677,7 @@ impl Isa for Mips {
                         addr: node!(Int(
                             IntOp::Add,
                             self.mem_type.addr_size,
-                            get_reg_native!(rs),
+                            get_reg_mem_addr!(rs),
                             cx.a(imm16.sext(self.mem_type.addr_size))
                         )),
                         size: MemSize::$sz,

@@ -11,7 +11,7 @@ pub struct Cartridge<R: Deref<Target = [u8]>> {
 
 impl<R: Deref<Target = [u8]>> Cartridge<R> {
     pub fn new(raw: RawRom<R>) -> Self {
-        let base32 = raw
+        let base = raw
             .load(
                 MemType {
                     addr_size: BitSize::B32,
@@ -21,10 +21,6 @@ impl<R: Deref<Target = [u8]>> Cartridge<R> {
                 MemSize::M32,
             )
             .unwrap();
-        // Sign-extend to a 64-bit address to preserve address decoding properties.
-        // FIXME(eddyb) it might be better to have a forced 32-bit-addresses
-        // 64-bit registers MIPS mode, and always truncate addr on load/store.
-        let base = base32.sext(BitSize::B64);
         Cartridge { raw, base }
     }
 
@@ -112,7 +108,21 @@ impl<R: Deref<Target = [u8]>> Platform for N64<R> {
 impl<R: Deref<Target = [u8]>> N64<R> {
     pub fn new(cx: &Cx, rom: Cartridge<R>) -> Self {
         N64 {
-            isa: Mips::new_64be(cx),
+            isa: Mips::new(
+                cx,
+                BitSize::B64,
+                MemType {
+                    // HACK(eddyb) this will truncate addresses on access, but
+                    // the correct semantics would be more to require "canonical"
+                    // addresses (i.e. 64-bit sign-extended from 32-bit, so the
+                    // top half is either all 0s or all 1s) - however, that's
+                    // unlikely to be a real option without a robust "assumptions"
+                    // system that assumes `x == sext_64(trunc_32(x))` by default
+                    // while also paying attention to any likely counterexamples.
+                    addr_size: BitSize::B32,
+                    big_endian: true,
+                },
+            ),
             rom,
         }
     }
