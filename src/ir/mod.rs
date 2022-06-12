@@ -203,6 +203,16 @@ pub enum IntOp {
     ShrU,
 }
 
+/// `IntOp::eval` error for `DivS`, `DivU`, `RemS`, or `RemU`.
+#[derive(Copy, Clone, Debug)]
+pub enum DivRemError {
+    /// `x / 0` or `x % 0` (both signed and unsigned).
+    DivByZero,
+
+    /// `iN::MIN /ₛ -1` or `iN::MIN %ₛ -1`.
+    SignedOverflow,
+}
+
 impl IntOp {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -227,7 +237,7 @@ impl IntOp {
         }
     }
 
-    pub fn eval(self, a: Const, b: Const) -> Option<Const> {
+    pub fn eval(self, a: Const, b: Const) -> Result<Const, DivRemError> {
         let size = match self {
             IntOp::Eq | IntOp::LtS | IntOp::LtU => BitSize::B1,
             _ => a.size,
@@ -258,13 +268,19 @@ impl IntOp {
             b.as_u64()
         };
 
+        let signed_divrem_err = if b == 0 {
+            DivRemError::DivByZero
+        } else {
+            DivRemError::SignedOverflow
+        };
+
         let r = match self {
             IntOp::Add => a.wrapping_add(b),
             IntOp::Mul => a.wrapping_mul(b),
-            IntOp::DivS => (a as i64).checked_div(b as i64)? as u64,
-            IntOp::DivU => a.checked_div(b)?,
-            IntOp::RemS => (a as i64).checked_rem(b as i64)? as u64,
-            IntOp::RemU => a.checked_rem(b)?,
+            IntOp::DivS => (a as i64).checked_div(b as i64).ok_or(signed_divrem_err)? as u64,
+            IntOp::DivU => a.checked_div(b).ok_or(DivRemError::DivByZero)?,
+            IntOp::RemS => (a as i64).checked_rem(b as i64).ok_or(signed_divrem_err)? as u64,
+            IntOp::RemU => a.checked_rem(b).ok_or(DivRemError::DivByZero)?,
 
             IntOp::Eq => (a == b) as u64,
             IntOp::LtS => ((a as i64) < (b as i64)) as u64,
@@ -278,7 +294,7 @@ impl IntOp {
             IntOp::ShrS => ((a as i64) >> b) as u64,
             IntOp::ShrU => a >> b,
         };
-        Some(Const::new(size, r & size.mask()))
+        Ok(Const::new(size, r & size.mask()))
     }
 
     pub fn simplify<T: Copy>(
@@ -287,7 +303,7 @@ impl IntOp {
         b: Result<Const, T>,
     ) -> Option<Result<Const, T>> {
         if let (Ok(a), Ok(b)) = (a, b) {
-            return Some(Ok(self.eval(a, b)?));
+            return Some(Ok(self.eval(a, b).ok()?));
         }
 
         // Symmetric ops.
@@ -701,9 +717,8 @@ impl Node {
             match (op, cx[a], cx[b]) {
                 (IntOp::Add, Node::Int(IntOp::Add, _, a, b), Node::Const(y)) => {
                     if let Node::Const(x) = cx[b] {
-                        if let Some(xy) = IntOp::Add.eval(x, y) {
-                            return Node::Int(IntOp::Add, size, a, cx.a(xy)).normalize(cx);
-                        }
+                        let xy = IntOp::Add.eval(x, y).unwrap();
+                        return Node::Int(IntOp::Add, size, a, cx.a(xy)).normalize(cx);
                     }
                 }
                 _ => {}
@@ -713,9 +728,8 @@ impl Node {
             match (op, cx[a], cx[b]) {
                 (IntOp::And, Node::Int(IntOp::And, _, a, b), Node::Const(y)) => {
                     if let Node::Const(x) = cx[b] {
-                        if let Some(xy) = IntOp::And.eval(x, y) {
-                            return Node::Int(IntOp::And, size, a, cx.a(xy)).normalize(cx);
-                        }
+                        let xy = IntOp::And.eval(x, y).unwrap();
+                        return Node::Int(IntOp::And, size, a, cx.a(xy)).normalize(cx);
                     }
                 }
                 _ => {}
@@ -746,7 +760,7 @@ impl Node {
                             let all_ones = Const::new(size, size.mask());
                             cx[shift]
                                 .as_const()
-                                .and_then(|shift| shift_op.eval(all_ones, shift))
+                                .map(|shift| shift_op.eval(all_ones, shift).unwrap())
                                 .unwrap_or(all_ones)
                         }
 
@@ -757,13 +771,12 @@ impl Node {
                         _ => unreachable!(),
                     };
 
-                    if let Some(masked_bits) = IntOp::And.eval(present_bits, mask) {
-                        if masked_bits == zero {
-                            return Ok(Node::Const(zero));
-                        }
-                        if masked_bits == present_bits {
-                            return Err(a);
-                        }
+                    let masked_bits = IntOp::And.eval(present_bits, mask).unwrap();
+                    if masked_bits == zero {
+                        return Ok(Node::Const(zero));
+                    }
+                    if masked_bits == present_bits {
+                        return Err(a);
                     }
                 }
                 _ => {}
@@ -775,11 +788,9 @@ impl Node {
                 | (IntOp::ShrU, Node::Int(inner_op @ IntOp::Shl, _, x, n2), Node::Const(n)) => {
                     if cx[n2] == Node::Const(n) {
                         let all_ones = Const::new(size, size.mask());
-                        if let Some(inner) = inner_op.eval(all_ones, n) {
-                            if let Some(mask) = op.eval(inner, n) {
-                                return Node::Int(IntOp::And, size, x, cx.a(mask)).normalize(cx);
-                            }
-                        }
+                        let inner = inner_op.eval(all_ones, n).unwrap();
+                        let mask = op.eval(inner, n).unwrap();
+                        return Node::Int(IntOp::And, size, x, cx.a(mask)).normalize(cx);
                     }
                 }
                 _ => {}
@@ -790,9 +801,8 @@ impl Node {
                 (IntOp::Or, Node::Int(IntOp::And, _, x1, c1), Node::Int(IntOp::And, _, x2, c2)) => {
                     if x1 == x2 {
                         if let (Node::Const(c1), Node::Const(c2)) = (cx[c1], cx[c2]) {
-                            if let Some(c) = IntOp::Or.eval(c1, c2) {
-                                return Node::Int(IntOp::And, size, x1, cx.a(c)).normalize(cx);
-                            }
+                            let c = IntOp::Or.eval(c1, c2).unwrap();
+                            return Node::Int(IntOp::And, size, x1, cx.a(c)).normalize(cx);
                         }
                     }
                 }
