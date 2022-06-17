@@ -1,5 +1,5 @@
 use crate::explore::{BlockId, Explorer};
-use crate::ir::{Const, Edges, Node, Visit, Visitor};
+use crate::ir::{Const, Edges, Visit, Visitor};
 use elsa::FrozenMap;
 use itertools::{Either, Itertools};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -252,7 +252,7 @@ impl<'a> Nester<'a> {
                 if let Edges::Branch { cond, t, e } = &mut edges {
                     mem::swap(t_child, e_child);
                     mem::swap(t, e);
-                    *cond = self.explorer.cx.a(Node::bit_not(*cond));
+                    *cond = self.explorer.cx.a(!*cond);
                 }
             }
         }

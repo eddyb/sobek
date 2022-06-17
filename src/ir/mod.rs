@@ -8,6 +8,8 @@ use std::ops::{Index, IndexMut, RangeTo};
 mod context;
 pub use self::context::{Cx, IGlobal, INode, IStr, InternInCx};
 
+mod build;
+
 scoped_thread_local!(static DBG_CX: Cx);
 scoped_thread_local!(static DBG_LOCALS: HashMap<INode, (IStr, usize)>);
 
@@ -237,6 +239,7 @@ impl IntOp {
         }
     }
 
+    #[inline]
     pub fn eval(self, a: Const, b: Const) -> Result<Const, DivRemError> {
         let size = match self {
             IntOp::Eq | IntOp::LtS | IntOp::LtU => BitSize::B1,
@@ -445,11 +448,11 @@ impl MemSize {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub struct MemRef {
+pub struct MemRef<A = INode> {
     pub mem: INode,
     // HACK(eddyb) cached for e.g. `Node::ty`.
     pub mem_type: MemType,
-    pub addr: INode,
+    pub addr: A,
     pub size: MemSize,
 }
 
@@ -473,6 +476,23 @@ impl MemRef {
             mem_type: self.mem_type,
             addr: self.addr.subst(cx, base),
             size: self.size,
+        }
+    }
+}
+
+impl<A> MemRef<A> {
+    pub fn map_addr<A2>(self, f: impl FnOnce(A) -> A2) -> MemRef<A2> {
+        let MemRef {
+            mem,
+            mem_type,
+            addr,
+            size,
+        } = self;
+        MemRef {
+            mem,
+            mem_type,
+            addr: f(addr),
+            size,
         }
     }
 }
@@ -563,73 +583,7 @@ impl fmt::Debug for Node {
 }
 
 impl Node {
-    // FIXME(eddyb) should these take `&Cx` instead?
-    pub fn int_neg(v: INode) -> impl InternInCx<Interned = INode> {
-        move |cx: &Cx| {
-            let size = cx[v].ty(cx).bit_size().unwrap();
-            Node::Int(IntOp::Mul, size, v, cx.a(Const::new(size, size.mask())))
-        }
-    }
-
-    pub fn int_sub(a: INode, b: INode) -> impl InternInCx<Interned = INode> {
-        move |cx: &Cx| {
-            let size = cx[a].ty(cx).bit_size().unwrap();
-            Node::Int(IntOp::Add, size, a, cx.a(Node::int_neg(b)))
-        }
-    }
-
-    pub fn bit_not(v: INode) -> impl InternInCx<Interned = INode> {
-        move |cx: &Cx| {
-            let size = cx[v].ty(cx).bit_size().unwrap();
-            Node::Int(IntOp::Xor, size, v, cx.a(Const::new(size, size.mask())))
-        }
-    }
-
-    pub fn bit_rol(v: INode, n: INode) -> impl InternInCx<Interned = INode> {
-        move |cx: &Cx| {
-            let size = cx[v].ty(cx).bit_size().unwrap();
-            Node::Int(
-                IntOp::Or,
-                size,
-                cx.a(Node::Int(IntOp::Shl, size, v, n)),
-                cx.a(Node::Int(
-                    IntOp::ShrU,
-                    size,
-                    v,
-                    cx.a(Node::int_sub(
-                        cx.a(Const::new(
-                            cx[n].ty(cx).bit_size().unwrap(),
-                            size.bits() as u64,
-                        )),
-                        n,
-                    )),
-                )),
-            )
-        }
-    }
-
-    pub fn bit_ror(v: INode, n: INode) -> impl InternInCx<Interned = INode> {
-        move |cx: &Cx| {
-            let size = cx[v].ty(cx).bit_size().unwrap();
-            Node::Int(
-                IntOp::Or,
-                size,
-                cx.a(Node::Int(IntOp::ShrU, size, v, n)),
-                cx.a(Node::Int(
-                    IntOp::Shl,
-                    size,
-                    v,
-                    cx.a(Node::int_sub(
-                        cx.a(Const::new(
-                            cx[n].ty(cx).bit_size().unwrap(),
-                            size.bits() as u64,
-                        )),
-                        n,
-                    )),
-                )),
-            )
-        }
-    }
+    // FIXME(eddyb) do any/all of these helper methods need `#[inline]`?
 
     pub fn ty(&self, cx: &Cx) -> Type {
         match *self {
@@ -678,7 +632,7 @@ impl Node {
         None
     }
 
-    fn normalize(self, cx: &Cx) -> Result<Self, INode> {
+    fn normalize_for_interning(self, cx: &Cx) -> Result<Self, INode> {
         // TODO(eddyb) resolve loads.
 
         if let Node::Const(c) = self {
@@ -710,15 +664,14 @@ impl Node {
             // HACK(eddyb) replace `x + a` with `a + x` where `x` is constant.
             // See also the TODO below about sorting symmetric ops.
             if op == IntOp::Add && c_a.is_some() && c_b.is_none() {
-                return Node::Int(IntOp::Add, size, b, a).normalize(cx);
+                return Err(cx.a(b + a));
             }
 
             // HACK(eddyb) fuse `(a + x) + y` where `x` and `y` are constants.
             match (op, cx[a], cx[b]) {
                 (IntOp::Add, Node::Int(IntOp::Add, _, a, b), Node::Const(y)) => {
                     if let Node::Const(x) = cx[b] {
-                        let xy = IntOp::Add.eval(x, y).unwrap();
-                        return Node::Int(IntOp::Add, size, a, cx.a(xy)).normalize(cx);
+                        return Err(cx.a(a + (x + y)));
                     }
                 }
                 _ => {}
@@ -728,8 +681,7 @@ impl Node {
             match (op, cx[a], cx[b]) {
                 (IntOp::And, Node::Int(IntOp::And, _, a, b), Node::Const(y)) => {
                     if let Node::Const(x) = cx[b] {
-                        let xy = IntOp::And.eval(x, y).unwrap();
-                        return Node::Int(IntOp::And, size, a, cx.a(xy)).normalize(cx);
+                        return Err(cx.a(a & (x & y)));
                     }
                 }
                 _ => {}
@@ -737,8 +689,7 @@ impl Node {
 
             // Simplify `x + x` to `x << 1`.
             if op == IntOp::Add && a == b {
-                return Node::Int(IntOp::Shl, size, a, cx.a(Const::new(BitSize::B8, 1)))
-                    .normalize(cx);
+                return Err(cx.a(a << 1));
             }
 
             // Simplify `x ^ x` to `0`.
@@ -771,7 +722,7 @@ impl Node {
                         _ => unreachable!(),
                     };
 
-                    let masked_bits = IntOp::And.eval(present_bits, mask).unwrap();
+                    let masked_bits = present_bits & mask;
                     if masked_bits == zero {
                         return Ok(Node::Const(zero));
                     }
@@ -790,7 +741,7 @@ impl Node {
                         let all_ones = Const::new(size, size.mask());
                         let inner = inner_op.eval(all_ones, n).unwrap();
                         let mask = op.eval(inner, n).unwrap();
-                        return Node::Int(IntOp::And, size, x, cx.a(mask)).normalize(cx);
+                        return Err(cx.a(x & mask));
                     }
                 }
                 _ => {}
@@ -801,8 +752,7 @@ impl Node {
                 (IntOp::Or, Node::Int(IntOp::And, _, x1, c1), Node::Int(IntOp::And, _, x2, c2)) => {
                     if x1 == x2 {
                         if let (Node::Const(c1), Node::Const(c2)) = (cx[c1], cx[c2]) {
-                            let c = IntOp::Or.eval(c1, c2).unwrap();
-                            return Node::Int(IntOp::And, size, x1, cx.a(c)).normalize(cx);
+                            return Err(cx.a(x1 & (c1 | c2)));
                         }
                     }
                 }
@@ -812,13 +762,7 @@ impl Node {
             // HACK(eddyb) replace `(x | y) & c` with `(x & c) | (y & c)`.
             match (op, cx[a], cx[b]) {
                 (IntOp::And, Node::Int(IntOp::Or, _, x, y), Node::Const(_)) => {
-                    return Node::Int(
-                        IntOp::Or,
-                        size,
-                        cx.a(Node::Int(IntOp::And, size, x, b)),
-                        cx.a(Node::Int(IntOp::And, size, y, b)),
-                    )
-                    .normalize(cx);
+                    return Err(cx.a((x & b) | (y & b)));
                 }
                 _ => {}
             }
@@ -867,11 +811,10 @@ impl Node {
                                                 first.size.bytes().into(),
                                             ))
                                     {
-                                        return Node::Load(MemRef {
+                                        return Err(cx.a(Node::Load(MemRef {
                                             size: MemSize::M16,
                                             ..first
-                                        })
-                                        .normalize(cx);
+                                        })));
                                     }
                                 }
                             }
@@ -899,17 +842,17 @@ impl Node {
             // NOTE(eddyb) this doesn't seem to be hit in practice, maybe remove?
             if let Node::Sext(_, y) | Node::Zext(_, y) = cx[x] {
                 let y_size = cx[y].ty(cx).bit_size().unwrap();
-                return if size == y_size {
-                    Err(y)
+                return Err(if size == y_size {
+                    y
                 } else if size < y_size {
-                    Node::Trunc(size, y).normalize(cx)
+                    cx.a(y.trunc(size))
                 } else {
                     match cx[x] {
-                        Node::Sext(..) => Node::Sext(size, y).normalize(cx),
-                        Node::Zext(..) => Node::Zext(size, y).normalize(cx),
+                        Node::Sext(..) => cx.a(y.sext(size)),
+                        Node::Zext(..) => cx.a(y.zext(size)),
                         _ => unreachable!(),
                     }
-                };
+                });
             }
         }
 
@@ -944,13 +887,7 @@ impl Node {
             if let Node::Trunc(_, y) = cx[x] {
                 let y_size = cx[y].ty(cx).bit_size().unwrap();
                 if size == y_size {
-                    return Node::Int(
-                        IntOp::And,
-                        y_size,
-                        y,
-                        cx.a(Const::new(y_size, x_size.mask())),
-                    )
-                    .normalize(cx);
+                    return Err(cx.a(y & Const::new(y_size, x_size.mask())));
                 }
             }
         }

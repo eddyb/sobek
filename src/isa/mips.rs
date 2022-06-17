@@ -275,7 +275,8 @@ impl Isa for Mips {
             Ok(x) => x,
             Err(e) => error!("failed to read ROM: {:?}", e),
         };
-        let add4 = |x| IntOp::Add.eval(x, Const::new(x.size, 4)).unwrap();
+        // FIXME(eddyb) make it possible to write this as `x + 4`.
+        let add4 = |x: Const| x + Const::new(x.size, 4);
         *pc = add4(*pc);
 
         let field = |i, w| (instr.as_u32() >> i) & ((1u32 << w) - 1u32);
@@ -286,12 +287,6 @@ impl Isa for Mips {
             (r(2), r(1), r(0))
         };
         let imm16 = instr.trunc(B16);
-
-        macro_rules! node {
-            ($name:ident($($arg:expr),*)) => {
-                cx.a(Node::$name($($arg),*))
-            }
-        }
 
         // Read the full width of a register.
         macro_rules! get_reg_native {
@@ -362,13 +357,7 @@ impl Isa for Mips {
         }
         macro_rules! branch_target {
             () => {
-                cx.a(IntOp::Add
-                    .eval(
-                        *pc,
-                        Const::new(B32, (imm16.sext(B32).as_u32() << 2) as u64)
-                            .sext(self.mem_type.addr_size),
-                    )
-                    .unwrap())
+                cx.a(*pc + (imm16.sext(B32) << 2).sext(self.mem_type.addr_size))
             };
         }
         macro_rules! branch {
@@ -487,24 +476,9 @@ impl Isa for Mips {
             let rt = get_reg_alu_input!(rt);
             let sa = field(6, 5);
             let v = match funct {
-                0 | 56 => node!(Int(
-                    IntOp::Shl,
-                    alu_size,
-                    rt,
-                    cx.a(Const::new(B32, sa as u64))
-                )),
-                2 | 58 => node!(Int(
-                    IntOp::ShrU,
-                    alu_size,
-                    rt,
-                    cx.a(Const::new(B32, sa as u64))
-                )),
-                3 | 59 => node!(Int(
-                    IntOp::ShrS,
-                    alu_size,
-                    rt,
-                    cx.a(Const::new(B32, sa as u64))
-                )),
+                0 | 56 => cx.a(rt << sa),
+                2 | 58 => cx.a(rt.shr_u(sa)),
+                3 | 59 => cx.a(rt.shr_s(sa)),
 
                 8 => return jump!(rs),
                 9 => {
@@ -524,14 +498,14 @@ impl Isa for Mips {
                 }
 
                 26 | 30 => {
-                    set_reg_alu_output!(Reg::Lo, node!(Int(IntOp::DivS, alu_size, rs, rt)));
-                    set_reg_alu_output!(Reg::Hi, node!(Int(IntOp::RemS, alu_size, rs, rt)));
+                    set_reg_alu_output!(Reg::Lo, cx.a(rs.div_s(rt)));
+                    set_reg_alu_output!(Reg::Hi, cx.a(rs.rem_s(rt)));
                     return Ok(state);
                 }
 
                 27 | 31 => {
-                    set_reg_alu_output!(Reg::Lo, node!(Int(IntOp::DivU, alu_size, rs, rt)));
-                    set_reg_alu_output!(Reg::Hi, node!(Int(IntOp::RemU, alu_size, rs, rt)));
+                    set_reg_alu_output!(Reg::Lo, cx.a(rs.div_u(rt)));
+                    set_reg_alu_output!(Reg::Hi, cx.a(rs.rem_u(rt)));
                     return Ok(state);
                 }
 
@@ -539,39 +513,23 @@ impl Isa for Mips {
                     // FIXME(eddyb) perform actual 128-bit multiplies, using
                     // `Sext(B128, ...)` for `funct=28`, and `Zext(B128, ...)`
                     // for `funct=29`, or emulate it using 64-bit operations only.
-                    let result = node!(Int(IntOp::Mul, B64, rs, rt));
+                    let result = cx.a(rs * rt);
                     set_reg_alu_output!(Reg::Lo, result);
                     set_reg_alu_output!(Reg::Hi, cx.a(Const::new(B64, 0)));
                     return Ok(state);
                 }
 
-                32 | 33 | 44 | 45 => node!(Int(IntOp::Add, alu_size, rs, rt)),
-                34 | 35 | 46 | 47 => node!(int_sub(rs, rt)),
-                36 => node!(Int(IntOp::And, self.regs.size, rs, rt)),
-                37 => node!(Int(IntOp::Or, self.regs.size, rs, rt)),
-                38 => node!(Int(IntOp::Xor, self.regs.size, rs, rt)),
-                39 => node!(bit_not(node!(Int(IntOp::Or, self.regs.size, rs, rt)))),
-                42 => node!(Zext(
-                    self.regs.size,
-                    node!(Int(IntOp::LtS, self.regs.size, rs, rt))
-                )),
-                43 => node!(Zext(
-                    self.regs.size,
-                    node!(Int(IntOp::LtU, self.regs.size, rs, rt))
-                )),
+                32 | 33 | 44 | 45 => cx.a(rs + rt),
+                34 | 35 | 46 | 47 => cx.a(rs - rt),
+                36 => cx.a(rs & rt),
+                37 => cx.a(rs | rt),
+                38 => cx.a(rs ^ rt),
+                39 => cx.a(!(rs | rt)),
+                42 => cx.a(rs.cmp_lt_s(rt).zext(self.regs.size)),
+                43 => cx.a(rs.cmp_lt_u(rt).zext(self.regs.size)),
 
-                60 => node!(Int(
-                    IntOp::Shl,
-                    alu_size,
-                    rt,
-                    cx.a(Const::new(B8, sa as u64 + 32))
-                )),
-                63 => node!(Int(
-                    IntOp::ShrU,
-                    alu_size,
-                    rt,
-                    cx.a(Const::new(B8, sa as u64 + 32))
-                )),
+                60 => cx.a(rt << (sa + 32)),
+                63 => cx.a(rt.shr_u(sa + 32)),
 
                 _ => error!("unknown SPECIAL funct={} (0b{0:06b} / 0x{0:02x})", funct),
             };
@@ -593,7 +551,7 @@ impl Isa for Mips {
                         // away control-flow in the general case.
                         return Ok(state);
                     }
-                    return branch!(node!(Int(IntOp::LtS, self.regs.size, rs, cx.a(Const::new(self.regs.size, 0)))) => true);
+                    return branch!(cx.a(rs.cmp_lt_s(Const::new(self.regs.size, 0))) => true);
                 }
                 1 | 17 => {
                     if (rt & 16) != 0 {
@@ -605,7 +563,7 @@ impl Isa for Mips {
                         // away control-flow in the general case.
                         return jump!(branch_target!());
                     }
-                    return branch!(node!(Int(IntOp::LtS, self.regs.size, rs, cx.a(Const::new(self.regs.size, 0)))) => false);
+                    return branch!(cx.a(rs.cmp_lt_s(Const::new(self.regs.size, 0))) => false);
                 }
                 _ => error!("unknown REGIMM rt={} (0b{0:06b} / 0x{0:02x})", rt),
             }
@@ -681,17 +639,7 @@ impl Isa for Mips {
                     let msbd = rd;
                     let size = msbd + 1;
                     let mask = !0u64 >> (64 - size);
-                    node!(Int(
-                        IntOp::And,
-                        alu_size,
-                        node!(Int(
-                            IntOp::ShrU,
-                            alu_size,
-                            rs,
-                            cx.a(Const::new(B32, lsb as u64))
-                        )),
-                        cx.a(Const::new(alu_size, mask))
-                    ))
+                    cx.a(rs.shr_u(lsb as u32) & Const::new(alu_size, mask))
                 }
                 _ => error!("unknown SPECIAL3 funct={} (0b{0:06b} / 0x{0:02x})", funct),
             };
@@ -717,12 +665,7 @@ impl Isa for Mips {
                     MemRef {
                         mem: state.get(cx, self.mem),
                         mem_type: self.mem_type,
-                        addr: node!(Int(
-                            IntOp::Add,
-                            self.mem_type.addr_size,
-                            get_reg_mem_addr!(rs),
-                            cx.a(imm16.sext(self.mem_type.addr_size))
-                        )),
+                        addr: get_reg_mem_addr!(rs) + imm16.sext(self.mem_type.addr_size),
                         size: MemSize::$sz,
                     }
                 };
@@ -737,16 +680,8 @@ impl Isa for Mips {
                     let _is_likely = matches!(op, 20..=23);
 
                     let (cond, negate) = match op {
-                        4 | 5 | 20 | 21 => (node!(Int(IntOp::Eq, self.regs.size, rs, rt)), false),
-                        6 | 7 | 22 | 23 => (
-                            node!(Int(
-                                IntOp::LtS,
-                                self.regs.size,
-                                cx.a(Const::new(self.regs.size, 0)),
-                                rs
-                            )),
-                            true,
-                        ),
+                        4 | 5 | 20 | 21 => (cx.a(rs.cmp_eq(rt)), false),
+                        6 | 7 | 22 | 23 => (cx.a(Const::new(self.regs.size, 0).cmp_lt_s(rs)), true),
                         _ => unreachable!(),
                     };
                     let negate = match op {
@@ -777,31 +712,25 @@ impl Isa for Mips {
                     let imm = imm32.sext(alu_size);
 
                     let rs = get_reg_alu_input!(rs);
-                    let mut v = node!(Int(op, alu_size, rs, cx.a(imm)));
+                    let mut v = cx.a(Node::Int(op, alu_size, rs, cx.a(imm)));
                     if cx[v].ty(cx) == Type::Bits(B1) {
-                        v = node!(Zext(alu_size, v));
+                        v = cx.a(v.zext(alu_size));
                     }
                     set_reg_alu_output!(rd, v);
                 }
-                15 => set_reg_alu_output!(rd, cx.a(Const::new(B32, (imm16.as_u32() << 16) as u64))),
+                15 => set_reg_alu_output!(rd, cx.a(imm16.zext(B32) << 16)),
 
-                32 => set_reg_alu_output!(rd, node!(Sext(B32, node!(Load(mem_ref!(M8)))))),
-                33 => set_reg_alu_output!(rd, node!(Sext(B32, node!(Load(mem_ref!(M16)))))),
-                35 => set_reg_alu_output!(rd, node!(Load(mem_ref!(M32)))),
-                36 => set_reg_alu_output!(rd, node!(Zext(B32, node!(Load(mem_ref!(M8)))))),
-                37 => set_reg_alu_output!(rd, node!(Zext(B32, node!(Load(mem_ref!(M16)))))),
+                // FIXME(eddyb) should `M32` loads also be `sext`ing?
+                // (also, should `B32` be replaced by `alu_size` in all loads?)
+                32 => set_reg_alu_output!(rd, cx.a(mem_ref!(M8).load().sext(B32))),
+                33 => set_reg_alu_output!(rd, cx.a(mem_ref!(M16).load().sext(B32))),
+                35 => set_reg_alu_output!(rd, cx.a(mem_ref!(M32).load())),
+                36 => set_reg_alu_output!(rd, cx.a(mem_ref!(M8).load().zext(B32))),
+                37 => set_reg_alu_output!(rd, cx.a(mem_ref!(M16).load().zext(B32))),
 
-                40 => state.set(
-                    cx,
-                    self.mem,
-                    node!(Store(mem_ref!(M8), node!(Trunc(B8, rt)))),
-                ),
-                41 => state.set(
-                    cx,
-                    self.mem,
-                    node!(Store(mem_ref!(M16), node!(Trunc(B16, rt)))),
-                ),
-                43 => state.set(cx, self.mem, node!(Store(mem_ref!(M32), rt))),
+                40 => state.set(cx, self.mem, cx.a(mem_ref!(M8).store(rt.trunc(B8)))),
+                41 => state.set(cx, self.mem, cx.a(mem_ref!(M16).store(rt.trunc(B16)))),
+                43 => state.set(cx, self.mem, cx.a(mem_ref!(M32).store(rt))),
 
                 47 => {
                     // FIXME(eddyb) use the result of rs+imm as an argument.
@@ -842,8 +771,8 @@ impl Isa for Mips {
                     }));
                 }
 
-                55 => set_reg_alu_output!(rd, node!(Load(mem_ref!(M64)))),
-                63 => state.set(cx, self.mem, node!(Store(mem_ref!(M64), rt))),
+                55 => set_reg_alu_output!(rd, cx.a(mem_ref!(M64).load())),
+                63 => state.set(cx, self.mem, cx.a(mem_ref!(M64).store(rt))),
 
                 _ => error!("unknown opcode {} (0b{0:06b} / 0x{0:02x})", op),
             }

@@ -19,15 +19,6 @@ pub trait InternInCx {
     fn intern_in_cx(self, cx: &Cx) -> Self::Interned;
 }
 
-// FIXME(eddyb) is this sort of thing even needed anymore?
-impl<T: InternInCx, F: FnOnce(&Cx) -> T> InternInCx for F {
-    type Interned = T::Interned;
-
-    fn intern_in_cx(self, cx: &Cx) -> T::Interned {
-        self(cx).intern_in_cx(cx)
-    }
-}
-
 impl Cx {
     pub fn new() -> Self {
         Cx {
@@ -159,7 +150,7 @@ impl AsRef<Self> for Node {
 impl InternInCx for Node {
     type Interned = INode;
     fn intern_in_cx(self, cx: &Cx) -> INode {
-        match self.normalize(cx) {
+        match self.normalize_for_interning(cx) {
             Ok(x) => INode(cx.interners.INode.intern(x)),
             Err(x) => x,
         }
